@@ -1,5 +1,6 @@
 mod error;
 mod idlgen;
+mod ui;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -20,11 +21,24 @@ struct Args {
     /// Output directory for the final .winmd file
     #[arg(long, default_value = "out")]
     winmd_dir: PathBuf,
+
+    /// Run in TUI mode to inspect the TypeLib
+    #[arg(long)]
+    ui: bool,
 }
 
 fn main() -> Result<(), error::Error> {
     let args = Args::parse();
     let tlb_path = std::path::Path::new(&args.tlb_path);
+
+    if args.ui {
+        if let Err(e) = ui::run(tlb_path.to_path_buf()) {
+            eprintln!("Error running TUI: {}", e);
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     let out_dir = &args.out_dir;
     let winmd_dir = &args.winmd_dir;
 

@@ -5,7 +5,7 @@ use windows::{
             CoInitialize, FUNCDESC, IMPLTYPEFLAGS, INVOKE_PROPERTYGET, INVOKE_PROPERTYPUT,
             INVOKE_PROPERTYPUTREF, INVOKEKIND, ITypeInfo, ITypeInfo2, ITypeLib, ITypeLib2,
             TKIND_ALIAS, TKIND_COCLASS, TKIND_DISPATCH, TKIND_ENUM, TKIND_INTERFACE, TKIND_MODULE,
-            TKIND_RECORD, TYPEATTR, TYPEDESC, VARDESC,
+            TKIND_RECORD, TKIND_UNION, TYPEATTR, TYPEDESC, VARDESC,
         },
         Ole::LoadTypeLib,
         Variant::{
@@ -19,16 +19,16 @@ use windows::{
 };
 use windows_core::{BSTR, HSTRING};
 
-struct TypeLibInfo {
+pub struct TypeLibInfo {
     tlib: Option<ITypeLib>,
 }
 
 impl TypeLibInfo {
-    fn new() -> Self {
+    pub fn new() -> Self {
         TypeLibInfo { tlib: None }
     }
 
-    fn load_type_lib(&mut self, path: &std::path::Path) -> Result<(), Error> {
+    pub fn load_type_lib(&mut self, path: &std::path::Path) -> Result<(), Error> {
         unsafe {
             let _ = CoInitialize(None);
         }
@@ -69,7 +69,7 @@ impl TypeLibInfo {
         }
     }
 
-    fn get_type_info_count(&self) -> u32 {
+    pub fn get_type_info_count(&self) -> u32 {
         if let Some(tlib) = &self.tlib {
             unsafe { tlib.GetTypeInfoCount() }
         } else {
@@ -84,6 +84,207 @@ impl TypeLibInfo {
             Err(Error::TypeLibNotLoaded)
         }
     }
+
+    pub fn get_type_name_and_kind(&self, index: u32) -> Result<(String, String), Error> {
+        let type_info = self.get_type_info(index)?;
+        unsafe {
+            let type_attr = type_info.GetTypeAttr()?;
+            let kind = match (*type_attr).typekind {
+                TKIND_ENUM => "Enum",
+                TKIND_RECORD => "Record",
+                TKIND_MODULE => "Module",
+                TKIND_INTERFACE => "Interface",
+                TKIND_DISPATCH => "Dispatch",
+                TKIND_COCLASS => "CoClass",
+                TKIND_ALIAS => "Alias",
+                TKIND_UNION => "Union",
+                _ => "Unknown",
+            }
+            .to_string();
+            let (name, _) = get_type_documentation(&type_info, -1);
+            type_info.ReleaseTypeAttr(type_attr);
+            Ok((name, kind))
+        }
+    }
+
+    pub fn get_type_idl(&self, index: u32) -> Result<String, Error> {
+        let type_info = self.get_type_info(index)?;
+        let mut out = Vec::new();
+        print_type_info(&type_info, &mut out)?;
+        Ok(String::from_utf8_lossy(&out).to_string())
+    }
+
+    pub fn get_type_methods(&self, index: u32) -> Result<Vec<MethodInfo>, Error> {
+        let type_info = self.get_type_info(index)?;
+        let mut methods = Vec::new();
+        unsafe {
+            let type_attr = type_info.GetTypeAttr()?;
+            for i in 0..(*type_attr).cFuncs {
+                if let Ok(func_desc) = type_info.GetFuncDesc(i as u32) {
+                    if let Ok(info) = get_function_info(&type_info, &*func_desc) {
+                        methods.push(info);
+                    }
+                    type_info.ReleaseFuncDesc(func_desc);
+                }
+            }
+            type_info.ReleaseTypeAttr(type_attr);
+        }
+        Ok(methods)
+    }
+
+    pub fn get_type_enums(&self, index: u32) -> Result<Vec<EnumItemInfo>, Error> {
+        let type_info = self.get_type_info(index)?;
+        let mut enums = Vec::new();
+        unsafe {
+            let type_attr = type_info.GetTypeAttr()?;
+            if (*type_attr).typekind == TKIND_ENUM {
+                for i in 0..(*type_attr).cVars {
+                    if let Ok(var_desc) = type_info.GetVarDesc(i as u32) {
+                        if let Ok(info) = get_enum_info(&type_info, &*var_desc) {
+                            enums.push(info);
+                        }
+                        type_info.ReleaseVarDesc(var_desc);
+                    }
+                }
+            }
+            type_info.ReleaseTypeAttr(type_attr);
+        }
+        Ok(enums)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumItemInfo {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParamInfo {
+    pub name: String,
+    pub type_name: String,
+    pub flags: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MethodInfo {
+    pub name: String,
+    pub ret_type: String,
+    pub params: Vec<ParamInfo>,
+    pub _invoke_kind: String,
+}
+
+unsafe fn get_enum_info(type_info: &ITypeInfo, var_desc: &VARDESC) -> Result<EnumItemInfo, Error> {
+    let memid = var_desc.memid;
+    let (name, _) = unsafe { get_type_documentation(type_info, memid) };
+
+    let value = if let Some(val) = unsafe { var_desc.Anonymous.lpvarValue.as_ref() } {
+        unsafe { val.Anonymous.Anonymous.Anonymous.lVal.to_string() }
+    } else {
+        String::new()
+    };
+
+    Ok(EnumItemInfo { name, value })
+}
+
+unsafe fn get_function_info(
+    type_info: &ITypeInfo,
+    func_desc: &FUNCDESC,
+) -> Result<MethodInfo, Error> {
+    let memid = func_desc.memid;
+    if memid >= 0x60000000 && memid < 0x60020000 {
+        return Err(Error::IoError(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Hidden method",
+        )));
+    }
+
+    let (name, _) = unsafe { get_type_documentation(type_info, memid) };
+    let _invoke_kind = match func_desc.invkind {
+        INVOKE_PROPERTYGET => "propget",
+        INVOKE_PROPERTYPUT => "propput",
+        INVOKE_PROPERTYPUTREF => "propputref",
+        _ => "func",
+    }
+    .to_string();
+
+    let mut ret_type = unsafe { type_desc_to_string(type_info, &func_desc.elemdescFunc.tdesc) };
+
+    let mut names: Vec<BSTR> = vec![BSTR::new(); (func_desc.cParams + 1) as usize];
+    let mut c_names = 0;
+    unsafe {
+        type_info
+            .GetNames(memid, names.as_mut_slice(), &mut c_names)
+            .ok()
+    };
+
+    let mut params = Vec::new();
+    for i in 0..func_desc.cParams {
+        let elem_desc = unsafe { *func_desc.lprgelemdescParam.offset(i as isize) };
+        let param_type = unsafe { type_desc_to_string(type_info, &elem_desc.tdesc) };
+        let param_name = if (i + 1) < c_names as i16 {
+            names[(i + 1) as usize].to_string()
+        } else {
+            format!("arg{}", i)
+        };
+
+        let param_flags = unsafe { elem_desc.Anonymous.paramdesc.wParamFlags };
+        let mut flags = Vec::new();
+        if (param_flags.0 & 1) != 0 {
+            flags.push("in".to_string());
+        }
+        if (param_flags.0 & 2) != 0 {
+            flags.push("out".to_string());
+        }
+        if (param_flags.0 & 4) != 0 {
+            flags.push("lcid".to_string());
+        }
+        if (param_flags.0 & 8) != 0 {
+            flags.push("retval".to_string());
+        }
+        if (param_flags.0 & 16) != 0 {
+            flags.push("optional".to_string());
+        }
+        if (param_flags.0 & 32) != 0 {
+            flags.push("defaultvalue".to_string());
+        }
+
+        params.push(ParamInfo {
+            name: param_name,
+            type_name: param_type,
+            flags,
+        });
+    }
+
+    // Handle return value transformation for HRESULT methods
+    if func_desc.invkind == INVOKE_PROPERTYGET || ret_type != "void" {
+        let mut real_ret_type = ret_type.clone();
+        // Check if there is a retval param
+        if let Some(pos) = params
+            .iter()
+            .position(|p| p.flags.contains(&"retval".to_string()))
+        {
+            // It's a COM method returning HRESULT with a retval param
+            // The "real" return type is the type of the retval param (pointer stripped)
+            let retval_param = &params[pos];
+            real_ret_type = retval_param.type_name.trim_end_matches('*').to_string();
+            // Remove the retval param from the list as it's now the return value
+            params.remove(pos);
+        } else {
+            // If no retval, it returns HRESULT (or whatever raw type), but usually we want to show HRESULT if it is one.
+            // But wait, type_desc_to_string returns "HRESULT" for VT_HRESULT.
+            // If it is HRESULT and no retval, it's just void in high-level languages usually, or HRESULT.
+            // Let's keep it as is for now.
+        }
+        ret_type = real_ret_type;
+    }
+
+    Ok(MethodInfo {
+        name,
+        ret_type,
+        params,
+        _invoke_kind,
+    })
 }
 
 pub fn get_library_name(tlb_path: &std::path::Path) -> Result<String, Error> {
