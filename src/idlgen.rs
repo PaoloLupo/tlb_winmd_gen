@@ -103,7 +103,7 @@ where
     let lib_attr = unsafe { &*type_lib_info.get_lib_attr()? };
     let (name, doc_string) = type_lib_info.get_documentation(-1)?;
 
-    writeln!(out, "// Decompilado desde {}", tlb_path.display())?;
+    writeln!(out, "// Decompilated from {}", tlb_path.display())?;
     writeln!(out, "[")?;
     writeln!(out, "  uuid({:?}),", lib_attr.guid)?;
     writeln!(
@@ -364,12 +364,10 @@ where
                 writeln!(out, "    }};")?;
             }
             TKIND_ALIAS => {
-                // typedef
                 if let Ok(_) = type_info
                     .GetRefTypeOfImplType(0)
                     .and_then(|href| type_info.GetRefTypeInfo(href))
                 {
-                    // Simplified alias handling
                     writeln!(out, "    typedef {};", name)?;
                 }
             }
@@ -384,7 +382,6 @@ where
                 writeln!(out, "    }} {};", name)?;
             }
             TKIND_MODULE => {
-                // Try to get dllname
                 let mut dll_name = String::new();
                 if (*type_attr).cFuncs > 0 {
                     if let Ok(func_desc) = type_info.GetFuncDesc(0) {
@@ -408,7 +405,6 @@ where
                 writeln!(out, "    ]")?;
                 writeln!(out, "    module {} {{", name)?;
 
-                // Print vars (constants)
                 for i in 0..(*type_attr).cVars {
                     if let Ok(var_desc) = type_info.GetVarDesc(i as u32) {
                         print_module_const(type_info, &*var_desc, out)?;
@@ -416,7 +412,6 @@ where
                     }
                 }
 
-                // Print funcs
                 for i in 0..(*type_attr).cFuncs {
                     if let Ok(func_desc) = type_info.GetFuncDesc(i as u32) {
                         type_info.ReleaseFuncDesc(func_desc);
@@ -557,7 +552,6 @@ where
             .GetNames(memid, names.as_mut_slice(), &mut c_names)
             .ok();
     }
-    // names[0] is the function name, names[1..] are params
 
     for i in 0..func_desc.cParams {
         let elem_desc = unsafe { *func_desc.lprgelemdescParam.offset(i as isize) };
@@ -617,7 +611,6 @@ where
         write!(out, "{}{} {}", attr_str, param_type, param_name)?;
     }
 
-    // Handle return value for property get or functions returning values
     if invoke_kind == INVOKE_PROPERTYGET || ret_type != "void" {
         if func_desc.cParams > 0 {
             write!(out, ", ")?;
