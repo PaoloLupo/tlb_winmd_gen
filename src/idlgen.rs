@@ -8,9 +8,8 @@ use windows::{
             TKIND_RECORD, TKIND_UNION, TYPEATTR, TYPEDESC, VARDESC,
         },
         Ole::{
-            LoadTypeLib, TYPEFLAG_FAGGREGATABLE, TYPEFLAG_FDISPATCHABLE, TYPEFLAG_FDUAL,
-            TYPEFLAG_FHIDDEN, TYPEFLAG_FNONEXTENSIBLE, TYPEFLAG_FOLEAUTOMATION,
-            TYPEFLAG_FRESTRICTED, TYPEFLAGS,
+            LoadTypeLib, TYPEFLAG_FDISPATCHABLE, TYPEFLAG_FDUAL, TYPEFLAG_FHIDDEN,
+            TYPEFLAG_FNONEXTENSIBLE, TYPEFLAG_FOLEAUTOMATION, TYPEFLAG_FRESTRICTED,
         },
         Variant::{
             VARIANT, VT_BOOL, VT_BSTR, VT_CY, VT_DATE, VT_DECIMAL, VT_DISPATCH, VT_EMPTY, VT_ERROR,
@@ -399,6 +398,74 @@ where
     Ok(())
 }
 
+fn print_interface_header<W>(type_info: &ITypeInfo, out: &mut W) -> Result<(), Error>
+where
+    W: std::io::Write,
+{
+    unsafe {
+        let type_attr: *mut TYPEATTR = type_info.GetTypeAttr()?;
+        let type_kind = (*type_attr).typekind;
+        let guid = (*type_attr).guid;
+        let (_, doc_string) = get_type_documentation(type_info, -1);
+        let type_flags = (*type_attr).wTypeFlags;
+
+        if type_kind == TKIND_INTERFACE
+            || type_kind == TKIND_DISPATCH
+            || type_kind == TKIND_COCLASS
+            || type_kind == TKIND_ENUM
+        {
+            writeln!(out, "    [")?;
+            writeln!(out, "      uuid({:?}),", guid)?;
+            if (*type_attr).wMajorVerNum != 0 || (*type_attr).wMinorVerNum > 0 {
+                writeln!(
+                    out,
+                    "      version({}.{}),",
+                    (*type_attr).wMajorVerNum,
+                    (*type_attr).wMinorVerNum
+                )?;
+            }
+
+            if !doc_string.is_empty() {
+                writeln!(out, "      helpstring(\"{}\"),", doc_string)?;
+            }
+            let mut attributes: Vec<&str> = Vec::new();
+
+            let flags_map = [
+                (TYPEFLAG_FHIDDEN.0 as u16, "hidden"),
+                (TYPEFLAG_FDUAL.0 as u16, "dual"),
+                (TYPEFLAG_FRESTRICTED.0 as u16, "restricted"),
+                (TYPEFLAG_FNONEXTENSIBLE.0 as u16, "nonextensible"),
+                (TYPEFLAG_FOLEAUTOMATION.0 as u16, "oleautomation"),
+            ];
+
+            for (flag, attr) in flags_map {
+                if (type_flags & flag) != 0 {
+                    attributes.push(attr);
+                }
+            }
+
+            if type_flags & (TYPEFLAG_FDISPATCHABLE.0 as u16 | TYPEFLAG_FDUAL.0 as u16) != 0 {
+                attributes.push("oleautomation");
+            }
+
+            if let Some((last, rest)) = attributes.split_last() {
+                for attr in rest {
+                    writeln!(out, "      {},", attr)?;
+                }
+                write!(out, "      {}", last)?;
+            }
+
+            // Custom attributes
+            if let Ok(type_info2) = type_info.cast::<ITypeInfo2>() {
+                print_custom_data(&type_info2, out)?;
+            }
+            writeln!(out, "\n    ]")?;
+        }
+
+        Ok(())
+    }
+}
+
 fn print_type_info<W>(type_info: &ITypeInfo, out: &mut W) -> Result<(), Error>
 where
     W: std::io::Write,
@@ -410,55 +477,7 @@ where
         let (name, doc_string) = get_type_documentation(type_info, -1);
         let type_flags = (*type_attr).wTypeFlags;
 
-        writeln!(out, "    [")?;
-        // writeln!(out, "      odl,")?; // MIDL doesnt need this
-        writeln!(out, "      uuid({:?}),", guid)?;
-        if type_kind == TKIND_INTERFACE || type_kind == TKIND_DISPATCH || type_kind == TKIND_COCLASS
-        {
-            if (*type_attr).wMajorVerNum != 0 || (*type_attr).wMinorVerNum > 0 {
-                writeln!(
-                    out,
-                    "      version({}.{}),",
-                    (*type_attr).wMajorVerNum,
-                    (*type_attr).wMinorVerNum
-                )?;
-            }
-        }
-        if !doc_string.is_empty() {
-            writeln!(out, "      helpstring(\"{}\"),", doc_string)?;
-        }
-        let mut attributes: Vec<&str> = Vec::new();
-
-        let flags_map = [
-            (TYPEFLAG_FHIDDEN.0 as u16, "hidden"),
-            (TYPEFLAG_FDUAL.0 as u16, "dual"),
-            (TYPEFLAG_FRESTRICTED.0 as u16, "restricted"),
-            (TYPEFLAG_FNONEXTENSIBLE.0 as u16, "nonextensible"),
-            (TYPEFLAG_FOLEAUTOMATION.0 as u16, "oleautomation"),
-        ];
-
-        for (flag, attr) in flags_map {
-            if (type_flags & flag) != 0 {
-                attributes.push(attr);
-            }
-        }
-
-        if type_flags & (TYPEFLAG_FDISPATCHABLE.0 as u16 | TYPEFLAG_FDUAL.0 as u16) != 0 {
-            attributes.push("oleautomation");
-        }
-
-        if let Some((last, rest)) = attributes.split_last() {
-            for attr in rest {
-                writeln!(out, "      {},", attr)?;
-            }
-            write!(out, "      {}", last)?;
-        }
-
-        // Custom attributes
-        if let Ok(type_info2) = type_info.cast::<ITypeInfo2>() {
-            print_custom_data(&type_info2, out)?;
-        }
-        writeln!(out, "\n    ]")?;
+        print_interface_header(type_info, out)?;
 
         match type_kind {
             TKIND_INTERFACE => {
