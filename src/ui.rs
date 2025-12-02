@@ -88,7 +88,15 @@ impl App {
 
         for i in 0..count {
             if let Ok((name, kind)) = type_lib_info.get_type_name_and_kind(i) {
-                types.push((name.clone(), kind));
+                types.push((name.clone(), kind.clone()));
+
+                // Index the type itself
+                all_search_items.push(SearchItem {
+                    type_index: i as usize,
+                    type_name: name.clone(),
+                    member_name: name.clone(), // For types, member_name is the same as type_name
+                    kind: kind.clone(),
+                });
 
                 // Pre-index methods
                 if let Ok(methods) = type_lib_info.get_type_methods(i) {
@@ -109,7 +117,7 @@ impl App {
                             type_index: i as usize,
                             type_name: name.clone(),
                             member_name: item.name,
-                            kind: "Enum".to_string(),
+                            kind: "EnumValue".to_string(),
                         });
                     }
                 }
@@ -409,9 +417,9 @@ impl App {
     fn select_global_result(&mut self) {
         if let Some(selected_idx) = self.global_search_state.selected() {
             if let Some(&item_idx) = self.global_search_results.get(selected_idx) {
-                let (type_index, member_name) =
+                let (type_index, member_name, kind) =
                     if let Some(item) = self.all_search_items.get(item_idx) {
-                        (item.type_index, item.member_name.clone())
+                        (item.type_index, item.member_name.clone(), item.kind.clone())
                     } else {
                         return;
                     };
@@ -429,28 +437,37 @@ impl App {
                     self.update_selection();
                 }
 
-                // Select the member in the content table
-                self.member_search_query = member_name.clone();
-                self.search_target = SearchTarget::Members; // Switch focus to member search so user can see/clear it
+                // If it's a method or enum value, select it in the content table
+                if kind == "Method" || kind == "EnumValue" {
+                    self.member_search_query = member_name.clone();
+                    self.search_target = SearchTarget::Members; // Switch focus to member search so user can see/clear it
 
-                // Need to find the index of the member in the current list
-                let member_query = member_name.to_lowercase();
-                if !self.current_methods.is_empty() {
-                    if let Some(pos) = self
-                        .current_methods
-                        .iter()
-                        .position(|m| m.name.to_lowercase() == member_query)
-                    {
-                        self.method_list_state.select(Some(pos));
+                    // Need to find the index of the member in the current list
+                    let member_query = member_name.to_lowercase();
+                    if !self.current_methods.is_empty() {
+                        if let Some(pos) = self
+                            .current_methods
+                            .iter()
+                            .position(|m| m.name.to_lowercase() == member_query)
+                        {
+                            self.method_list_state.select(Some(pos));
+                        }
+                    } else if !self.current_enums.is_empty() {
+                        if let Some(pos) = self
+                            .current_enums
+                            .iter()
+                            .position(|e| e.name.to_lowercase() == member_query)
+                        {
+                            self.content_table_state.select(Some(pos));
+                        }
                     }
-                } else if !self.current_enums.is_empty() {
-                    if let Some(pos) = self
-                        .current_enums
-                        .iter()
-                        .position(|e| e.name.to_lowercase() == member_query)
-                    {
-                        self.content_table_state.select(Some(pos));
-                    }
+                } else {
+                    // It's a type (Interface, Enum, Dispatch, etc.)
+                    // We already selected the type in the left panel.
+                    // Just ensure we are focusing on the type list and clear member search
+                    self.member_search_query.clear();
+                    self.search_target = SearchTarget::Types;
+                    self.focus = Focus::TypeList;
                 }
             }
         }
