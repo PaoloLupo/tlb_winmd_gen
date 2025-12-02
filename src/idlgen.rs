@@ -451,15 +451,14 @@ where
             for attr in rest {
                 writeln!(out, "      {},", attr)?;
             }
-            writeln!(out, "      {}", last)?;
+            write!(out, "      {}", last)?;
         }
 
         // Custom attributes
         if let Ok(type_info2) = type_info.cast::<ITypeInfo2>() {
             print_custom_data(&type_info2, out)?;
         }
-
-        writeln!(out, "    ]")?;
+        writeln!(out, "\n    ]")?;
 
         match type_kind {
             TKIND_INTERFACE => {
@@ -729,7 +728,8 @@ where
             let bstr_val = unsafe { &val.Anonymous.Anonymous.Anonymous.bstrVal };
             // bstr_val is ManuallyDrop<BSTR>
             let s = bstr_val.to_string();
-            writeln!(out, "      custom({:?}, \"{}\"),", guid, s)?;
+            write!(out, ",\n")?;
+            write!(out, "      custom({:?}, \"{}\")", guid, s)?;
         }
     }
     Ok(())
