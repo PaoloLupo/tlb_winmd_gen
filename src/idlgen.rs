@@ -751,7 +751,7 @@ where
         return Ok(());
     }
 
-    let (name, _) = unsafe { get_type_documentation(type_info, memid) };
+    let (name, doc_string) = unsafe { get_type_documentation(type_info, memid) };
 
     let invoke_kind = func_desc.invkind;
     let prop_prefix = match invoke_kind {
@@ -763,7 +763,12 @@ where
 
     let ret_type = unsafe { type_desc_to_string(type_info, &func_desc.elemdescFunc.tdesc) };
 
-    writeln!(out, "        [id(0x{:08x})]", memid)?;
+    write!(out, "        [id(0x{:08x})", memid)?;
+    if !doc_string.is_empty() {
+        write!(out, ", helpstring(\"{}\")", doc_string)?;
+    }
+    write!(out, "]\n")?;
+
     write!(out, "        {}HRESULT {} (", prop_prefix, name)?;
 
     // Get parameter names
