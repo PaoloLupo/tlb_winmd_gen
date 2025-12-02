@@ -171,7 +171,7 @@ pub struct MethodInfo {
     pub name: String,
     pub ret_type: String,
     pub params: Vec<ParamInfo>,
-    pub invoke_kind: String,
+    pub _invoke_kind: String,
 }
 
 unsafe fn get_enum_info(type_info: &ITypeInfo, var_desc: &VARDESC) -> Result<EnumItemInfo, Error> {
@@ -199,8 +199,8 @@ unsafe fn get_function_info(
         )));
     }
 
-    let (name, _) = get_type_documentation(type_info, memid);
-    let invoke_kind = match func_desc.invkind {
+    let (name, _) = unsafe { get_type_documentation(type_info, memid) };
+    let _invoke_kind = match func_desc.invkind {
         INVOKE_PROPERTYGET => "propget",
         INVOKE_PROPERTYPUT => "propput",
         INVOKE_PROPERTYPUTREF => "propputref",
@@ -208,25 +208,27 @@ unsafe fn get_function_info(
     }
     .to_string();
 
-    let mut ret_type = type_desc_to_string(type_info, &func_desc.elemdescFunc.tdesc);
+    let mut ret_type = unsafe { type_desc_to_string(type_info, &func_desc.elemdescFunc.tdesc) };
 
     let mut names: Vec<BSTR> = vec![BSTR::new(); (func_desc.cParams + 1) as usize];
     let mut c_names = 0;
-    type_info
-        .GetNames(memid, names.as_mut_slice(), &mut c_names)
-        .ok();
+    unsafe {
+        type_info
+            .GetNames(memid, names.as_mut_slice(), &mut c_names)
+            .ok()
+    };
 
     let mut params = Vec::new();
     for i in 0..func_desc.cParams {
-        let elem_desc = *func_desc.lprgelemdescParam.offset(i as isize);
-        let param_type = type_desc_to_string(type_info, &elem_desc.tdesc);
+        let elem_desc = unsafe { *func_desc.lprgelemdescParam.offset(i as isize) };
+        let param_type = unsafe { type_desc_to_string(type_info, &elem_desc.tdesc) };
         let param_name = if (i + 1) < c_names as i16 {
             names[(i + 1) as usize].to_string()
         } else {
             format!("arg{}", i)
         };
 
-        let param_flags = elem_desc.Anonymous.paramdesc.wParamFlags;
+        let param_flags = unsafe { elem_desc.Anonymous.paramdesc.wParamFlags };
         let mut flags = Vec::new();
         if (param_flags.0 & 1) != 0 {
             flags.push("in".to_string());
@@ -281,7 +283,7 @@ unsafe fn get_function_info(
         name,
         ret_type,
         params,
-        invoke_kind,
+        _invoke_kind,
     })
 }
 
