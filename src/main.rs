@@ -1,3 +1,4 @@
+mod chm_doc;
 mod error;
 mod idlgen;
 mod ui;
@@ -25,14 +26,61 @@ struct Args {
     /// Run in TUI mode to inspect the TypeLib
     #[arg(long)]
     ui: bool,
+
+    /// Path to CHM documentation file
+    #[arg(long)]
+    chm: Option<String>,
+
+    /// Inspect CHM file and list contents
+    #[arg(long)]
+    inspect_chm: Option<String>,
+
+    /// Lookup raw HTML for a term in CHM
+    #[arg(long)]
+    lookup: Option<String>,
 }
 
 fn main() -> Result<(), error::Error> {
     let args = Args::parse();
     let tlb_path = std::path::Path::new(&args.tlb_path);
 
+    if let Some(chm_path) = &args.inspect_chm {
+        println!("Inspecting CHM: {}", chm_path);
+        match chm_doc::ChmDocumentationProvider::new(chm_path) {
+            Ok(provider) => {
+                if let Some(term) = &args.lookup {
+                    println!("Looking up: {}", term);
+                    if let Some(html) = provider.get_raw_doc(term) {
+                        println!("--- Raw HTML Content ---");
+                        println!("{}", html);
+                        println!("--- End Raw HTML ---");
+                    } else {
+                        println!("Term not found.");
+                    }
+                } else {
+                    let files = provider.list_files();
+                    println!("Found {} files:", files.len());
+                    for file in files {
+                        println!(" - {}", file);
+                        if file.ends_with(".hhk") {
+                            println!("--- Content of {} ---", file);
+                            if let Some(content) = provider.get_file_content(&file) {
+                                println!("{}", String::from_utf8_lossy(&content));
+                            } else {
+                                println!("(Failed to read content)");
+                            }
+                            println!("--- End of {} ---", file);
+                        }
+                    }
+                }
+            }
+            Err(e) => eprintln!("Failed to open CHM: {}", e),
+        }
+        return Ok(());
+    }
+
     if args.ui {
-        if let Err(e) = ui::run(tlb_path.to_path_buf()) {
+        if let Err(e) = ui::run(tlb_path.to_path_buf(), args.chm) {
             eprintln!("Error running TUI: {}", e);
             std::process::exit(1);
         }

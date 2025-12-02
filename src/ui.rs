@@ -1,10 +1,14 @@
+use crate::chm_doc::ChmDocumentationProvider;
 use crate::idlgen::{EnumItemInfo, MethodInfo, TypeLibInfo};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+        DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen,
+        disable_raw_mode, enable_raw_mode,
+    },
 };
 use ratatui::{
     Terminal,
@@ -47,8 +51,10 @@ struct SearchItem {
 struct App {
     tlb_path: PathBuf,
     type_lib_info: TypeLibInfo,
-    types: Vec<(String, String)>,                 // Name, Kind
-    filtered_types: Vec<(usize, String, String)>, // Original Index, Name, Kind
+    doc_provider: Option<ChmDocumentationProvider>, // New field
+    show_doc: bool,                                 // New field
+    types: Vec<(String, String)>,                   // Name, Kind
+    filtered_types: Vec<(usize, String, String)>,   // Original Index, Name, Kind
     list_state: ListState,
     list_scroll_state: ScrollbarState, // Scrollbar for Type List
     current_idl: String,
@@ -71,7 +77,7 @@ struct App {
 }
 
 impl App {
-    fn new(tlb_path: PathBuf) -> Result<Self, Box<dyn Error>> {
+    fn new(tlb_path: PathBuf, chm_path: Option<String>) -> Result<Self, Box<dyn Error>> {
         let mut type_lib_info = TypeLibInfo::new();
         type_lib_info.load_type_lib(&tlb_path)?;
 
@@ -109,9 +115,25 @@ impl App {
             }
         }
 
+        let doc_provider = if let Some(path) = chm_path {
+            match ChmDocumentationProvider::new(&path) {
+                Ok(provider) => Some(provider),
+                Err(_e) => {
+                    // Log error or just ignore? For TUI, maybe just print to stderr before starting?
+                    // Or just ignore and have no docs.
+                    // eprintln!("Failed to load CHM: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let mut app = App {
             tlb_path,
             type_lib_info,
+            doc_provider,
+            show_doc: false,
             types,
             filtered_types: Vec::new(),
             list_state: ListState::default(),
@@ -133,9 +155,7 @@ impl App {
             global_search_state: ListState::default(),
             global_search_scroll_state: ScrollbarState::default(),
         };
-
         app.update_filter();
-
         Ok(app)
     }
 
@@ -149,54 +169,51 @@ impl App {
             .map(|(i, (name, kind))| (i, name.clone(), kind.clone()))
             .collect();
 
+        self.list_state.select(None);
+        self.list_scroll_state = self
+            .list_scroll_state
+            .content_length(self.filtered_types.len());
         if !self.filtered_types.is_empty() {
             self.list_state.select(Some(0));
+            self.update_selection();
         } else {
-            self.list_state.select(None);
+            self.current_idl.clear();
+            self.current_methods.clear();
+            self.current_enums.clear();
+            self.content_table_state.select(None);
         }
-        self.update_selection();
     }
 
     fn update_selection(&mut self) {
-        self.content_table_state.select(None); // Reset content selection on type change
         if let Some(selected_idx) = self.list_state.selected() {
             if let Some((original_idx, _, _)) = self.filtered_types.get(selected_idx) {
-                let idx = *original_idx as u32;
-                if let Ok(idl) = self.type_lib_info.get_type_idl(idx) {
+                if let Ok(idl) = self.type_lib_info.get_type_idl(*original_idx as u32) {
                     self.current_idl = idl;
-                } else {
-                    self.current_idl = "Error loading IDL".to_string();
                 }
-
-                if let Ok(methods) = self.type_lib_info.get_type_methods(idx) {
+                if let Ok(methods) = self.type_lib_info.get_type_methods(*original_idx as u32) {
                     self.current_methods = methods;
                 } else {
-                    self.current_methods = Vec::new();
+                    self.current_methods.clear();
                 }
-
-                if let Ok(enums) = self.type_lib_info.get_type_enums(idx) {
+                if let Ok(enums) = self.type_lib_info.get_type_enums(*original_idx as u32) {
                     self.current_enums = enums;
                 } else {
-                    self.current_enums = Vec::new();
+                    self.current_enums.clear();
                 }
-            } else {
-                self.current_idl = String::new();
-                self.current_methods = Vec::new();
-                self.current_enums = Vec::new();
+
+                // Reset content selection and scroll
+                self.content_table_state.select(None);
+                self.content_scroll_state = ScrollbarState::default();
+                if !self.current_methods.is_empty() || !self.current_enums.is_empty() {
+                    self.content_table_state.select(Some(0));
+                }
             }
-        } else {
-            self.current_idl = String::new();
-            self.current_methods = Vec::new();
-            self.current_enums = Vec::new();
         }
     }
 
     fn next(&mut self) {
         match self.focus {
             Focus::TypeList => {
-                if self.filtered_types.is_empty() {
-                    return;
-                }
                 let i = match self.list_state.selected() {
                     Some(i) => {
                         if i >= self.filtered_types.len() - 1 {
@@ -208,23 +225,19 @@ impl App {
                     None => 0,
                 };
                 self.list_state.select(Some(i));
+                self.list_scroll_state = self.list_scroll_state.position(i);
                 self.update_selection();
             }
             Focus::Content => {
-                if self.view_mode == ViewMode::Structured {
-                    let count = if !self.current_methods.is_empty() {
-                        self.current_methods.len()
-                    } else {
-                        self.current_enums.len()
-                    };
-
-                    if count == 0 {
-                        return;
-                    }
-
+                let len = if !self.current_methods.is_empty() {
+                    self.current_methods.len()
+                } else {
+                    self.current_enums.len()
+                };
+                if len > 0 {
                     let i = match self.content_table_state.selected() {
                         Some(i) => {
-                            if i >= count - 1 {
+                            if i >= len - 1 {
                                 0
                             } else {
                                 i + 1
@@ -233,6 +246,7 @@ impl App {
                         None => 0,
                     };
                     self.content_table_state.select(Some(i));
+                    self.content_scroll_state = self.content_scroll_state.position(i);
                 }
             }
         }
@@ -241,9 +255,6 @@ impl App {
     fn previous(&mut self) {
         match self.focus {
             Focus::TypeList => {
-                if self.filtered_types.is_empty() {
-                    return;
-                }
                 let i = match self.list_state.selected() {
                     Some(i) => {
                         if i == 0 {
@@ -255,24 +266,20 @@ impl App {
                     None => 0,
                 };
                 self.list_state.select(Some(i));
+                self.list_scroll_state = self.list_scroll_state.position(i);
                 self.update_selection();
             }
             Focus::Content => {
-                if self.view_mode == ViewMode::Structured {
-                    let count = if !self.current_methods.is_empty() {
-                        self.current_methods.len()
-                    } else {
-                        self.current_enums.len()
-                    };
-
-                    if count == 0 {
-                        return;
-                    }
-
+                let len = if !self.current_methods.is_empty() {
+                    self.current_methods.len()
+                } else {
+                    self.current_enums.len()
+                };
+                if len > 0 {
                     let i = match self.content_table_state.selected() {
                         Some(i) => {
                             if i == 0 {
-                                count - 1
+                                len - 1
                             } else {
                                 i - 1
                             }
@@ -280,6 +287,7 @@ impl App {
                         None => 0,
                     };
                     self.content_table_state.select(Some(i));
+                    self.content_scroll_state = self.content_scroll_state.position(i);
                 }
             }
         }
@@ -379,12 +387,9 @@ impl App {
                     self.update_selection();
                 }
 
-                self.view_mode = ViewMode::Structured;
+                // Select the member in the content table
                 self.member_search_query = member_name.clone();
-                self.search_target = SearchTarget::Members;
-                self.focus = Focus::Content; // Focus content to show selection
-
-                // Try to auto-scroll to the member
+                // Need to find the index of the member in the current list
                 let member_query = member_name.to_lowercase();
                 if !self.current_methods.is_empty() {
                     if let Some(pos) = self
@@ -406,9 +411,50 @@ impl App {
             }
         }
     }
+
+    fn get_selected_name(&self) -> Option<String> {
+        match self.focus {
+            Focus::TypeList => {
+                if let Some(idx) = self.list_state.selected() {
+                    if idx < self.filtered_types.len() {
+                        return Some(self.filtered_types[idx].1.clone());
+                    }
+                }
+            }
+            Focus::Content => {
+                if let Some(idx) = self.content_table_state.selected() {
+                    let member_query = self.member_search_query.to_lowercase();
+                    if !self.current_methods.is_empty() {
+                        let filtered_methods: Vec<&MethodInfo> = self
+                            .current_methods
+                            .iter()
+                            .filter(|m| m.name.to_lowercase().contains(&member_query))
+                            .collect();
+                        if idx < filtered_methods.len() {
+                            return Some(filtered_methods[idx].name.clone());
+                        }
+                    } else if !self.current_enums.is_empty() {
+                        let filtered_enums: Vec<&EnumItemInfo> = self
+                            .current_enums
+                            .iter()
+                            .filter(|e| e.name.to_lowercase().contains(&member_query))
+                            .collect();
+                        if idx < filtered_enums.len() {
+                            return Some(filtered_enums[idx].name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn is_method_selected(&self) -> bool {
+        self.focus == Focus::Content && !self.current_methods.is_empty()
+    }
 }
 
-pub fn run(tlb_path: PathBuf) -> Result<(), Box<dyn Error>> {
+pub fn run(tlb_path: PathBuf, chm_path: Option<String>) -> Result<(), Box<dyn Error>> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -417,12 +463,8 @@ pub fn run(tlb_path: PathBuf) -> Result<(), Box<dyn Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app
-    let app = App::new(tlb_path);
-
-    let res = match app {
-        Ok(mut app) => run_app(&mut terminal, &mut app),
-        Err(e) => Err(e),
-    };
+    let app = App::new(tlb_path, chm_path)?;
+    let res = run_app(&mut terminal, app);
 
     // Restore terminal
     disable_raw_mode()?;
@@ -434,15 +476,15 @@ pub fn run(tlb_path: PathBuf) -> Result<(), Box<dyn Error>> {
     terminal.show_cursor()?;
 
     if let Err(err) = res {
-        println!("{:?}", err);
+        println!("{:?}", err)
     }
 
     Ok(())
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<(), Box<dyn Error>> {
+fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     loop {
-        terminal.draw(|f| ui(f, app))?;
+        terminal.draw(|f| ui(f, &mut app))?;
 
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
@@ -483,6 +525,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<(), 
                         }
                         KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.toggle_search_target();
+                        }
+                        KeyCode::Enter => {
+                            if app.is_method_selected() {
+                                app.show_doc = !app.show_doc;
+                            }
                         }
                         KeyCode::Char(c) => match app.search_target {
                             SearchTarget::Types => {
@@ -552,36 +599,13 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         })
         .collect();
 
-    let list_border_style = if app.focus == Focus::TypeList {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default()
-    };
-
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(list_border_style)
-                .title(format!("Types - {}", app.tlb_path.display())),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::Blue) // Unified Blue
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(">> ");
+        .block(Block::default().borders(Borders::ALL).title("Types"))
+        .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
 
     f.render_stateful_widget(list, content_chunks[0], &mut app.list_state);
 
-    // Render Scrollbar for Type List
-    app.list_scroll_state = app
-        .list_scroll_state
-        .content_length(app.filtered_types.len());
-    if let Some(i) = app.list_state.selected() {
-        app.list_scroll_state = app.list_scroll_state.position(i);
-    }
+    // Render Scrollbar for Types
     f.render_stateful_widget(
         Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
@@ -591,9 +615,9 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         &mut app.list_scroll_state,
     );
 
-    // Right panel
+    // Right panel: Content (IDL or Structured)
     let content_border_style = if app.focus == Focus::Content {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(Color::Yellow)
     } else {
         Style::default()
     };
@@ -801,38 +825,33 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             .constraints([Constraint::Length(3), Constraint::Min(0)].as_ref())
             .split(inner_area);
 
-        let search_input = Paragraph::new(app.global_search_query.as_str())
+        let search_paragraph = Paragraph::new(app.global_search_query.as_str())
             .block(Block::default().borders(Borders::ALL).title("Query"))
-            .style(Style::default().fg(Color::White));
-        f.render_widget(search_input, chunks[0]);
+            .style(Style::default().fg(Color::Cyan));
+        f.render_widget(search_paragraph, chunks[0]);
 
         let items: Vec<ListItem> = app
             .global_search_results
             .iter()
             .map(|&idx| {
-                let item = &app.all_search_items[idx];
-                let content = Line::from(vec![
-                    Span::styled(
-                        format!("{:<10}", item.kind),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                    Span::styled(
-                        format!("{:<20}", item.type_name),
-                        Style::default().fg(Color::Cyan),
-                    ),
-                    Span::styled(&item.member_name, Style::default().fg(Color::White)), // Explicit white for legibility
-                ]);
-                ListItem::new(content)
+                if let Some(item) = app.all_search_items.get(idx) {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!("{:<10}", item.kind),
+                            Style::default().fg(Color::Yellow),
+                        ),
+                        Span::raw(format!("{}::", item.type_name)),
+                        Span::styled(&item.member_name, Style::default().fg(Color::Cyan)),
+                    ]))
+                } else {
+                    ListItem::new("Invalid Item")
+                }
             })
             .collect();
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title("Results"))
-            .highlight_style(
-                Style::default()
-                    .bg(Color::Blue) // Darker highlight (Blue)
-                    .add_modifier(Modifier::BOLD),
-            );
+            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
 
         f.render_stateful_widget(list, chunks[1], &mut app.global_search_state);
 
@@ -851,6 +870,194 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             chunks[1],
             &mut app.global_search_scroll_state,
         );
+    }
+
+    // Documentation Popup
+    if app.show_doc {
+        let area = centered_rect(90, 80, f.area());
+        f.render_widget(Clear, area);
+
+        let block = Block::default()
+            .title(" Documentation (Enter to close) ")
+            .borders(Borders::ALL)
+            .style(Style::default().bg(Color::Black));
+
+        let inner_area = block.inner(area);
+        f.render_widget(block, area);
+
+        // Layout:
+        // Top: Description (20%)
+        // Bottom: Split into Left (Signature) and Right (Parameters) (80%)
+        let main_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(20), Constraint::Percentage(80)].as_ref())
+            .split(inner_area);
+
+        // --- Top: Description ---
+        if let Some(provider) = &app.doc_provider {
+            if let Some(name) = app.get_selected_name() {
+                if let Some(doc) = provider.get_doc(&name) {
+                    let desc_paragraph = Paragraph::new(doc.description)
+                        .block(
+                            Block::default()
+                                .borders(Borders::BOTTOM)
+                                .title(" Description "),
+                        )
+                        .wrap(Wrap { trim: true });
+                    f.render_widget(desc_paragraph, main_chunks[0]);
+
+                    // --- Bottom Split ---
+                    // Left: Signature (30%)
+                    // Right: Parameters (70%)
+                    let bottom_chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints(
+                            [Constraint::Percentage(30), Constraint::Percentage(70)].as_ref(),
+                        )
+                        .split(main_chunks[1]);
+
+                    // --- Bottom Left: Function Signature ---
+                    let mut signature_lines = Vec::new();
+                    let member_query = app.member_search_query.to_lowercase();
+                    let filtered_methods: Vec<&MethodInfo> = app
+                        .current_methods
+                        .iter()
+                        .filter(|m| m.name.to_lowercase().contains(&member_query))
+                        .collect();
+
+                    if let Some(idx) = app.content_table_state.selected() {
+                        if let Some(method) = filtered_methods.get(idx) {
+                            // Same styling as main view
+                            let mut lines = Vec::new();
+                            lines.push(Line::from(vec![
+                                Span::styled("ƒ ", Style::default().fg(Color::Magenta)),
+                                Span::styled(
+                                    &method.name,
+                                    Style::default()
+                                        .fg(Color::Gray)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(" ("),
+                            ]));
+
+                            for param in &method.params {
+                                let mut param_spans = Vec::new();
+                                param_spans.push(Span::raw("    "));
+                                if param.flags.contains(&"in".to_string()) {
+                                    param_spans.push(Span::styled(
+                                        "↓ ",
+                                        Style::default().fg(Color::Green),
+                                    ));
+                                }
+                                if param.flags.contains(&"out".to_string()) {
+                                    param_spans
+                                        .push(Span::styled("↑ ", Style::default().fg(Color::Red)));
+                                }
+                                if param.flags.contains(&"defaultvalue".to_string()) {
+                                    param_spans
+                                        .push(Span::styled("* ", Style::default().fg(Color::Blue)));
+                                }
+                                if param.flags.contains(&"optional".to_string()) {
+                                    param_spans.push(Span::styled(
+                                        "? ",
+                                        Style::default().fg(Color::Yellow),
+                                    ));
+                                }
+                                param_spans.push(Span::styled(
+                                    format!("{} ", param.type_name),
+                                    Style::default().fg(Color::White),
+                                ));
+                                param_spans.push(Span::raw(&param.name));
+                                param_spans.push(Span::raw(","));
+                                lines.push(Line::from(param_spans));
+                            }
+
+                            lines.push(Line::from(vec![
+                                Span::raw("  ) -> "),
+                                Span::styled(&method.ret_type, Style::default().fg(Color::Green)),
+                            ]));
+
+                            signature_lines = lines;
+                        }
+                    }
+
+                    let signature_paragraph = Paragraph::new(signature_lines)
+                        .block(
+                            Block::default()
+                                .borders(Borders::RIGHT)
+                                .title(" Signature "),
+                        )
+                        .wrap(Wrap { trim: false });
+                    f.render_widget(signature_paragraph, bottom_chunks[0]);
+
+                    // --- Bottom Right: Parameters Table ---
+                    if !doc.parameters.is_empty() {
+                        let header_cells = ["Name", "Type", "Description"]
+                            .iter()
+                            .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow)));
+                        let header = Row::new(header_cells).height(1).bottom_margin(1);
+
+                        // Calculate column width for description
+                        // Table width is bottom_chunks[1].width
+                        // Constraints: 20%, 30%, 50%
+                        // Description column is 50% of the table width
+                        // We subtract 3 for borders/padding roughly
+                        let table_width = bottom_chunks[1].width.saturating_sub(2);
+                        let desc_col_width = (table_width as f32 * 0.5) as usize;
+                        // Ensure at least some width
+                        let desc_col_width = desc_col_width.max(10);
+
+                        let rows = doc.parameters.iter().map(|param| {
+                            // Use textwrap to calculate exact lines needed
+                            let wrapped_desc = textwrap::wrap(&param.description, desc_col_width);
+                            let height = (wrapped_desc.len() as u16).max(1);
+
+                            let desc_text = wrapped_desc.join("\n");
+
+                            let cells = vec![
+                                Cell::from(Span::styled(
+                                    &param.name,
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                )),
+                                Cell::from(Span::raw(&param.type_info)),
+                                Cell::from(Text::from(desc_text)),
+                            ];
+                            Row::new(cells).height(height)
+                        });
+
+                        let table = Table::new(
+                            rows,
+                            [
+                                Constraint::Percentage(20),
+                                Constraint::Percentage(30),
+                                Constraint::Percentage(50),
+                            ],
+                        )
+                        .header(header)
+                        .block(
+                            Block::default()
+                                .borders(Borders::LEFT)
+                                .title(" Parameters "),
+                        );
+
+                        f.render_widget(table, bottom_chunks[1]);
+                    } else {
+                        f.render_widget(
+                            Paragraph::new("No parameters documented.")
+                                .block(Block::default().borders(Borders::LEFT)),
+                            bottom_chunks[1],
+                        );
+                    }
+                } else {
+                    f.render_widget(Paragraph::new("No documentation found."), main_chunks[0]);
+                }
+            }
+        } else {
+            f.render_widget(
+                Paragraph::new("Documentation provider not available."),
+                main_chunks[0],
+            );
+        }
     }
 }
 
