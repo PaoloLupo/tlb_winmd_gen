@@ -5,10 +5,7 @@ use crossterm::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     },
     execute,
-    terminal::{
-        DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen,
-        disable_raw_mode, enable_raw_mode,
-    },
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
     Terminal,
@@ -38,7 +35,8 @@ enum SearchTarget {
 #[derive(PartialEq)]
 enum Focus {
     TypeList,
-    Content,
+    MethodList,
+    Details,
 }
 
 struct SearchItem {
@@ -51,10 +49,9 @@ struct SearchItem {
 struct App {
     tlb_path: PathBuf,
     type_lib_info: TypeLibInfo,
-    doc_provider: Option<ChmDocumentationProvider>, // New field
-    show_doc: bool,                                 // New field
-    types: Vec<(String, String)>,                   // Name, Kind
-    filtered_types: Vec<(usize, String, String)>,   // Original Index, Name, Kind
+    doc_provider: Option<ChmDocumentationProvider>,
+    types: Vec<(String, String)>,                 // Name, Kind
+    filtered_types: Vec<(usize, String, String)>, // Original Index, Name, Kind
     list_state: ListState,
     list_scroll_state: ScrollbarState, // Scrollbar for Type List
     current_idl: String,
@@ -65,8 +62,12 @@ struct App {
     view_mode: ViewMode,
     search_target: SearchTarget,
     focus: Focus,
-    content_table_state: TableState,
-    content_scroll_state: ScrollbarState,
+    method_list_state: ListState, // State for Method List (Middle Panel)
+    method_list_scroll_state: ScrollbarState, // Scrollbar for Method List
+    details_scroll_offset: u16,   // Scroll offset for Details Panel
+    details_scroll_state: ScrollbarState, // Scrollbar for Details Panel
+    content_table_state: TableState, // Kept for Enums
+    content_scroll_state: ScrollbarState, // Kept for Enums
     // Global Search
     all_search_items: Vec<SearchItem>,
     show_global_search: bool,
@@ -118,12 +119,7 @@ impl App {
         let doc_provider = if let Some(path) = chm_path {
             match ChmDocumentationProvider::new(&path) {
                 Ok(provider) => Some(provider),
-                Err(_e) => {
-                    // Log error or just ignore? For TUI, maybe just print to stderr before starting?
-                    // Or just ignore and have no docs.
-                    // eprintln!("Failed to load CHM: {}", e);
-                    None
-                }
+                Err(_e) => None,
             }
         } else {
             None
@@ -133,7 +129,6 @@ impl App {
             tlb_path,
             type_lib_info,
             doc_provider,
-            show_doc: false,
             types,
             filtered_types: Vec::new(),
             list_state: ListState::default(),
@@ -146,6 +141,10 @@ impl App {
             view_mode: ViewMode::Structured,
             search_target: SearchTarget::Types,
             focus: Focus::TypeList,
+            method_list_state: ListState::default(),
+            method_list_scroll_state: ScrollbarState::default(),
+            details_scroll_offset: 0,
+            details_scroll_state: ScrollbarState::default(),
             content_table_state: TableState::default(),
             content_scroll_state: ScrollbarState::default(),
             all_search_items,
@@ -202,9 +201,17 @@ impl App {
                 }
 
                 // Reset content selection and scroll
+                self.method_list_state.select(None);
+                self.method_list_scroll_state = ScrollbarState::default();
+                self.details_scroll_offset = 0;
+                self.details_scroll_state = ScrollbarState::default();
+
                 self.content_table_state.select(None);
                 self.content_scroll_state = ScrollbarState::default();
-                if !self.current_methods.is_empty() || !self.current_enums.is_empty() {
+
+                if !self.current_methods.is_empty() {
+                    self.method_list_state.select(Some(0));
+                } else if !self.current_enums.is_empty() {
                     self.content_table_state.select(Some(0));
                 }
             }
@@ -228,16 +235,28 @@ impl App {
                 self.list_scroll_state = self.list_scroll_state.position(i);
                 self.update_selection();
             }
-            Focus::Content => {
-                let len = if !self.current_methods.is_empty() {
-                    self.current_methods.len()
-                } else {
-                    self.current_enums.len()
-                };
-                if len > 0 {
+            Focus::MethodList => {
+                if !self.current_methods.is_empty() {
+                    let i = match self.method_list_state.selected() {
+                        Some(i) => {
+                            if i >= self.current_methods.len() - 1 {
+                                0
+                            } else {
+                                i + 1
+                            }
+                        }
+                        None => 0,
+                    };
+                    self.method_list_state.select(Some(i));
+                    self.method_list_scroll_state = self.method_list_scroll_state.position(i);
+                    // Reset details scroll when changing method
+                    self.details_scroll_offset = 0;
+                    self.details_scroll_state = ScrollbarState::default();
+                } else if !self.current_enums.is_empty() {
+                    // Enums use content_table_state (2 panel layout)
                     let i = match self.content_table_state.selected() {
                         Some(i) => {
-                            if i >= len - 1 {
+                            if i >= self.current_enums.len() - 1 {
                                 0
                             } else {
                                 i + 1
@@ -248,6 +267,13 @@ impl App {
                     self.content_table_state.select(Some(i));
                     self.content_scroll_state = self.content_scroll_state.position(i);
                 }
+            }
+            Focus::Details => {
+                // Scroll details
+                self.details_scroll_offset = self.details_scroll_offset.saturating_add(1);
+                self.details_scroll_state = self
+                    .details_scroll_state
+                    .position(self.details_scroll_offset as usize);
             }
         }
     }
@@ -269,17 +295,27 @@ impl App {
                 self.list_scroll_state = self.list_scroll_state.position(i);
                 self.update_selection();
             }
-            Focus::Content => {
-                let len = if !self.current_methods.is_empty() {
-                    self.current_methods.len()
-                } else {
-                    self.current_enums.len()
-                };
-                if len > 0 {
+            Focus::MethodList => {
+                if !self.current_methods.is_empty() {
+                    let i = match self.method_list_state.selected() {
+                        Some(i) => {
+                            if i == 0 {
+                                self.current_methods.len() - 1
+                            } else {
+                                i - 1
+                            }
+                        }
+                        None => 0,
+                    };
+                    self.method_list_state.select(Some(i));
+                    self.method_list_scroll_state = self.method_list_scroll_state.position(i);
+                    self.details_scroll_offset = 0;
+                    self.details_scroll_state = ScrollbarState::default();
+                } else if !self.current_enums.is_empty() {
                     let i = match self.content_table_state.selected() {
                         Some(i) => {
                             if i == 0 {
-                                len - 1
+                                self.current_enums.len() - 1
                             } else {
                                 i - 1
                             }
@@ -289,6 +325,12 @@ impl App {
                     self.content_table_state.select(Some(i));
                     self.content_scroll_state = self.content_scroll_state.position(i);
                 }
+            }
+            Focus::Details => {
+                self.details_scroll_offset = self.details_scroll_offset.saturating_sub(1);
+                self.details_scroll_state = self
+                    .details_scroll_state
+                    .position(self.details_scroll_offset as usize);
             }
         }
     }
@@ -399,7 +441,7 @@ impl App {
                         .iter()
                         .position(|m| m.name.to_lowercase() == member_query)
                     {
-                        self.content_table_state.select(Some(pos));
+                        self.method_list_state.select(Some(pos));
                     }
                 } else if !self.current_enums.is_empty() {
                     if let Some(pos) = self
@@ -423,10 +465,10 @@ impl App {
                     }
                 }
             }
-            Focus::Content => {
-                if let Some(idx) = self.content_table_state.selected() {
-                    let member_query = self.member_search_query.to_lowercase();
-                    if !self.current_methods.is_empty() {
+            Focus::MethodList | Focus::Details => {
+                let member_query = self.member_search_query.to_lowercase();
+                if !self.current_methods.is_empty() {
+                    if let Some(idx) = self.method_list_state.selected() {
                         let filtered_methods: Vec<&MethodInfo> = self
                             .current_methods
                             .iter()
@@ -435,7 +477,9 @@ impl App {
                         if idx < filtered_methods.len() {
                             return Some(filtered_methods[idx].name.clone());
                         }
-                    } else if !self.current_enums.is_empty() {
+                    }
+                } else if !self.current_enums.is_empty() {
+                    if let Some(idx) = self.content_table_state.selected() {
                         let filtered_enums: Vec<&EnumItemInfo> = self
                             .current_enums
                             .iter()
@@ -452,7 +496,8 @@ impl App {
     }
 
     fn is_method_selected(&self) -> bool {
-        self.focus == Focus::Content && !self.current_methods.is_empty()
+        (self.focus == Focus::MethodList || self.focus == Focus::Details)
+            && !self.current_methods.is_empty()
     }
 }
 
@@ -517,8 +562,20 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                         KeyCode::Esc => return Ok(()),
                         KeyCode::Down => app.next(),
                         KeyCode::Up => app.previous(),
-                        KeyCode::Right => app.focus = Focus::Content,
-                        KeyCode::Left => app.focus = Focus::TypeList,
+                        KeyCode::Right => match app.focus {
+                            Focus::TypeList => app.focus = Focus::MethodList,
+                            Focus::MethodList => {
+                                if !app.current_methods.is_empty() {
+                                    app.focus = Focus::Details;
+                                }
+                            }
+                            _ => {}
+                        },
+                        KeyCode::Left => match app.focus {
+                            Focus::Details => app.focus = Focus::MethodList,
+                            Focus::MethodList => app.focus = Focus::TypeList,
+                            _ => {}
+                        },
                         KeyCode::Tab => app.toggle_view(),
                         KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.show_global_search = true;
@@ -529,9 +586,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                             app.toggle_search_target();
                         }
                         KeyCode::Enter => {
-                            if app.is_method_selected() {
-                                app.show_doc = !app.show_doc;
-                            }
+                            // Enter key logic if needed, e.g. select global search result
                         }
                         KeyCode::Char(c) => match app.search_target {
                             SearchTarget::Types => {
@@ -617,138 +672,222 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         &mut app.list_scroll_state,
     );
 
-    // Right panel: Content (IDL or Structured)
-    let content_border_style = if app.focus == Focus::Content {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default()
-    };
+    // Right panel area (split further if needed)
+    let right_area = content_chunks[1];
 
     match app.view_mode {
         ViewMode::Idl => {
             let idl_paragraph = Paragraph::new(app.current_idl.as_str())
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(content_border_style)
-                        .title("IDL Preview"),
-                )
+                .block(Block::default().borders(Borders::ALL).title("IDL Preview"))
                 .wrap(Wrap { trim: false });
-            f.render_widget(idl_paragraph, content_chunks[1]);
+            f.render_widget(idl_paragraph, right_area);
         }
         ViewMode::Structured => {
-            let member_query = app.member_search_query.to_lowercase();
-
             if !app.current_methods.is_empty() {
-                let header_cells = ["Method Signature"]
-                    .iter()
-                    .map(|h| Cell::from(*h).style(Style::default().fg(Color::White))); // White text for header
-                let header = Row::new(header_cells)
-                    .style(Style::default().bg(Color::Blue)) // Unified Blue for header
-                    .height(1);
+                // 3-Panel Layout for Methods
+                // Split right_area into Method List (Middle) and Details (Right)
+                let method_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(40), Constraint::Percentage(60)].as_ref())
+                    .split(right_area);
 
+                // --- Middle Panel: Method List ---
+                let member_query = app.member_search_query.to_lowercase();
                 let filtered_methods: Vec<&MethodInfo> = app
                     .current_methods
                     .iter()
                     .filter(|m| m.name.to_lowercase().contains(&member_query))
                     .collect();
 
-                let rows = filtered_methods.iter().map(|method| {
-                    // Format:
-                    // ƒ Name
-                    //     ↓ Type Param
-                    //     ↑ Type Param
-                    //     -> ReturnType
-                    let mut lines = Vec::new();
+                let method_items: Vec<ListItem> = filtered_methods
+                    .iter()
+                    .map(|m| {
+                        ListItem::new(Line::from(vec![
+                            Span::styled("ƒ ", Style::default().fg(Color::Magenta)),
+                            Span::raw(&m.name),
+                        ]))
+                    })
+                    .collect();
 
-                    // Line 1: Function Name
-                    lines.push(Line::from(vec![
-                        Span::styled("ƒ ", Style::default().fg(Color::Magenta)),
-                        Span::styled(
-                            &method.name,
-                            Style::default()
-                                .fg(Color::Gray)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(" ("),
-                    ]));
+                let method_border_style = if app.focus == Focus::MethodList {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
 
-                    // Params (indented)
-                    for param in &method.params {
-                        let mut param_spans = Vec::new();
-                        param_spans.push(Span::raw("    ")); // Indentation
-
-                        // Icons for flags
-                        if param.flags.contains(&"in".to_string()) {
-                            param_spans.push(Span::styled("↓ ", Style::default().fg(Color::Green)));
-                        }
-                        if param.flags.contains(&"out".to_string()) {
-                            param_spans.push(Span::styled("↑ ", Style::default().fg(Color::Red)));
-                        }
-                        if param.flags.contains(&"defaultvalue".to_string()) {
-                            param_spans.push(Span::styled("* ", Style::default().fg(Color::Blue)));
-                        }
-                        if param.flags.contains(&"optional".to_string()) {
-                            param_spans
-                                .push(Span::styled("? ", Style::default().fg(Color::Yellow)));
-                        }
-
-                        param_spans.push(Span::styled(
-                            format!("{} ", param.type_name),
-                            Style::default().fg(Color::White),
-                        ));
-                        param_spans.push(Span::raw(&param.name));
-                        param_spans.push(Span::raw(","));
-
-                        lines.push(Line::from(param_spans));
-                    }
-
-                    // Return type
-                    lines.push(Line::from(vec![
-                        Span::raw("  ) -> "),
-                        Span::styled(&method.ret_type, Style::default().fg(Color::Green)),
-                    ]));
-
-                    // Add an empty line separator
-                    lines.push(Line::from(""));
-
-                    let height = lines.len() as u16;
-                    Row::new(vec![Cell::from(Text::from(lines))]).height(height)
-                });
-
-                let table = Table::new(rows, [Constraint::Percentage(100)])
-                    .header(header)
+                let method_list = List::new(method_items)
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .border_style(content_border_style)
-                            .title("Methods"),
+                            .border_style(method_border_style)
+                            .title("Functions"),
                     )
-                    .row_highlight_style(Style::default().bg(Color::Blue)); // Unified Blue
+                    .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
 
-                f.render_stateful_widget(table, content_chunks[1], &mut app.content_table_state);
+                f.render_stateful_widget(method_list, method_chunks[0], &mut app.method_list_state);
 
-                // Render Scrollbar for Methods
-                app.content_scroll_state = app
-                    .content_scroll_state
+                // Scrollbar for Method List
+                app.method_list_scroll_state = app
+                    .method_list_scroll_state
                     .content_length(filtered_methods.len());
-                if let Some(i) = app.content_table_state.selected() {
-                    app.content_scroll_state = app.content_scroll_state.position(i);
+                if let Some(i) = app.method_list_state.selected() {
+                    app.method_list_scroll_state = app.method_list_scroll_state.position(i);
                 }
                 f.render_stateful_widget(
                     Scrollbar::default()
                         .orientation(ScrollbarOrientation::VerticalRight)
                         .begin_symbol(Some("↑"))
                         .end_symbol(Some("↓")),
-                    content_chunks[1],
-                    &mut app.content_scroll_state,
+                    method_chunks[0],
+                    &mut app.method_list_scroll_state,
                 );
+
+                // --- Right Panel: Details (Signature + Docs) ---
+                let details_border_style = if app.focus == Focus::Details {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+
+                let details_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(details_border_style)
+                    .title("Details");
+
+                let inner_details_area = details_block.inner(method_chunks[1]);
+                f.render_widget(details_block, method_chunks[1]);
+
+                if let Some(selected_idx) = app.method_list_state.selected() {
+                    if let Some(method) = filtered_methods.get(selected_idx) {
+                        // Render content inside details panel
+                        // We will render to a buffer or just render widgets vertically
+                        let details_layout = Layout::default()
+                            .direction(Direction::Vertical)
+                            .constraints([Constraint::Min(0)].as_ref())
+                            .split(inner_details_area);
+
+                        let mut lines = Vec::new();
+
+                        // 1. Signature
+                        lines.push(Line::from(vec![
+                            Span::styled("ƒ ", Style::default().fg(Color::Magenta)),
+                            Span::styled(
+                                &method.name,
+                                Style::default()
+                                    .fg(Color::White)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(" ("),
+                        ]));
+
+                        for param in &method.params {
+                            let mut param_spans = Vec::new();
+                            param_spans.push(Span::raw("    "));
+                            if param.flags.contains(&"in".to_string()) {
+                                param_spans
+                                    .push(Span::styled("↓ ", Style::default().fg(Color::Green)));
+                            }
+                            if param.flags.contains(&"out".to_string()) {
+                                param_spans
+                                    .push(Span::styled("↑ ", Style::default().fg(Color::Red)));
+                            }
+                            if param.flags.contains(&"defaultvalue".to_string()) {
+                                param_spans
+                                    .push(Span::styled("* ", Style::default().fg(Color::Blue)));
+                            }
+                            if param.flags.contains(&"optional".to_string()) {
+                                param_spans
+                                    .push(Span::styled("? ", Style::default().fg(Color::Yellow)));
+                            }
+                            param_spans.push(Span::styled(
+                                format!("{} ", param.type_name),
+                                Style::default().fg(Color::White),
+                            ));
+                            param_spans.push(Span::raw(&param.name));
+                            param_spans.push(Span::raw(","));
+                            lines.push(Line::from(param_spans));
+                        }
+
+                        lines.push(Line::from(vec![
+                            Span::raw("  ) -> "),
+                            Span::styled(&method.ret_type, Style::default().fg(Color::Green)),
+                        ]));
+                        lines.push(Line::from("")); // Spacer
+
+                        // 2. Documentation
+                        if let Some(provider) = &app.doc_provider {
+                            if let Some(doc) = provider.get_doc(&method.name) {
+                                lines.push(Line::from(Span::styled(
+                                    "Description:",
+                                    Style::default()
+                                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                                )));
+                                lines.push(Line::from(doc.description));
+                                lines.push(Line::from(""));
+
+                                if !doc.parameters.is_empty() {
+                                    lines.push(Line::from(Span::styled(
+                                        "Parameters:",
+                                        Style::default()
+                                            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                                    )));
+                                    for param in doc.parameters {
+                                        lines.push(Line::from(vec![
+                                            Span::styled(
+                                                format!("- {}: ", param.name),
+                                                Style::default().fg(Color::Cyan),
+                                            ),
+                                            Span::raw(param.description),
+                                        ]));
+                                    }
+                                }
+                            } else {
+                                lines.push(Line::from(Span::styled(
+                                    "No documentation found.",
+                                    Style::default().fg(Color::DarkGray),
+                                )));
+                            }
+                        } else {
+                            lines.push(Line::from(Span::styled(
+                                "Documentation provider not available.",
+                                Style::default().fg(Color::DarkGray),
+                            )));
+                        }
+
+                        // Create a Paragraph with the lines
+                        // We need to handle scrolling for the details panel
+                        let total_lines = lines.len();
+                        let paragraph = Paragraph::new(lines)
+                            .wrap(Wrap { trim: false })
+                            .scroll((app.details_scroll_offset, 0));
+
+                        f.render_widget(paragraph, details_layout[0]);
+
+                        // Scrollbar for Details
+                        app.details_scroll_state =
+                            app.details_scroll_state.content_length(total_lines);
+                        app.details_scroll_state = app
+                            .details_scroll_state
+                            .position(app.details_scroll_offset as usize);
+
+                        f.render_stateful_widget(
+                            Scrollbar::default()
+                                .orientation(ScrollbarOrientation::VerticalRight)
+                                .begin_symbol(Some("↑"))
+                                .end_symbol(Some("↓")),
+                            details_layout[0],
+                            &mut app.details_scroll_state,
+                        );
+                    }
+                }
             } else if !app.current_enums.is_empty() {
+                // 2-Panel Layout for Enums (Existing logic, just ensured it fits)
+                let member_query = app.member_search_query.to_lowercase();
                 let header_cells = ["Name", "Value"]
                     .iter()
-                    .map(|h| Cell::from(*h).style(Style::default().fg(Color::White))); // White text for header
+                    .map(|h| Cell::from(*h).style(Style::default().fg(Color::White)));
                 let header = Row::new(header_cells)
-                    .style(Style::default().bg(Color::Blue)) // Unified Blue for header
+                    .style(Style::default().bg(Color::Blue))
                     .height(1);
 
                 let filtered_enums: Vec<&EnumItemInfo> = app
@@ -764,6 +903,13 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                     ])
                 });
 
+                let content_border_style = if app.focus == Focus::MethodList {
+                    // Enums share MethodList focus for middle panel
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+
                 let table = Table::new(
                     rows,
                     [Constraint::Percentage(70), Constraint::Percentage(30)],
@@ -775,9 +921,9 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                         .border_style(content_border_style)
                         .title("Enum Values"),
                 )
-                .row_highlight_style(Style::default().bg(Color::Blue)); // Unified Blue
+                .row_highlight_style(Style::default().bg(Color::Blue));
 
-                f.render_stateful_widget(table, content_chunks[1], &mut app.content_table_state);
+                f.render_stateful_widget(table, right_area, &mut app.content_table_state);
 
                 // Render Scrollbar for Enums
                 app.content_scroll_state = app
@@ -791,7 +937,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                         .orientation(ScrollbarOrientation::VerticalRight)
                         .begin_symbol(Some("↑"))
                         .end_symbol(Some("↓")),
-                    content_chunks[1],
+                    right_area,
                     &mut app.content_scroll_state,
                 );
             } else {
@@ -800,16 +946,15 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .border_style(content_border_style)
                             .title("IDL Preview (No structured data)"),
                     )
                     .wrap(Wrap { trim: false });
-                f.render_widget(idl_paragraph, content_chunks[1]);
+                f.render_widget(idl_paragraph, right_area);
             }
         }
     }
 
-    // Global Search Popup
+    // Global Search Popup (Keep this)
     if app.show_global_search {
         let area = centered_rect(60, 50, f.area());
         f.render_widget(Clear, area); // Clear background
@@ -872,194 +1017,6 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             chunks[1],
             &mut app.global_search_scroll_state,
         );
-    }
-
-    // Documentation Popup
-    if app.show_doc {
-        let area = centered_rect(90, 80, f.area());
-        f.render_widget(Clear, area);
-
-        let block = Block::default()
-            .title(" Documentation (Enter to close) ")
-            .borders(Borders::ALL)
-            .style(Style::default().bg(Color::Black));
-
-        let inner_area = block.inner(area);
-        f.render_widget(block, area);
-
-        // Layout:
-        // Top: Description (20%)
-        // Bottom: Split into Left (Signature) and Right (Parameters) (80%)
-        let main_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(20), Constraint::Percentage(80)].as_ref())
-            .split(inner_area);
-
-        // --- Top: Description ---
-        if let Some(provider) = &app.doc_provider {
-            if let Some(name) = app.get_selected_name() {
-                if let Some(doc) = provider.get_doc(&name) {
-                    let desc_paragraph = Paragraph::new(doc.description)
-                        .block(
-                            Block::default()
-                                .borders(Borders::BOTTOM)
-                                .title(" Description "),
-                        )
-                        .wrap(Wrap { trim: true });
-                    f.render_widget(desc_paragraph, main_chunks[0]);
-
-                    // --- Bottom Split ---
-                    // Left: Signature (30%)
-                    // Right: Parameters (70%)
-                    let bottom_chunks = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints(
-                            [Constraint::Percentage(30), Constraint::Percentage(70)].as_ref(),
-                        )
-                        .split(main_chunks[1]);
-
-                    // --- Bottom Left: Function Signature ---
-                    let mut signature_lines = Vec::new();
-                    let member_query = app.member_search_query.to_lowercase();
-                    let filtered_methods: Vec<&MethodInfo> = app
-                        .current_methods
-                        .iter()
-                        .filter(|m| m.name.to_lowercase().contains(&member_query))
-                        .collect();
-
-                    if let Some(idx) = app.content_table_state.selected() {
-                        if let Some(method) = filtered_methods.get(idx) {
-                            // Same styling as main view
-                            let mut lines = Vec::new();
-                            lines.push(Line::from(vec![
-                                Span::styled("ƒ ", Style::default().fg(Color::Magenta)),
-                                Span::styled(
-                                    &method.name,
-                                    Style::default()
-                                        .fg(Color::Gray)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                                Span::raw(" ("),
-                            ]));
-
-                            for param in &method.params {
-                                let mut param_spans = Vec::new();
-                                param_spans.push(Span::raw("    "));
-                                if param.flags.contains(&"in".to_string()) {
-                                    param_spans.push(Span::styled(
-                                        "↓ ",
-                                        Style::default().fg(Color::Green),
-                                    ));
-                                }
-                                if param.flags.contains(&"out".to_string()) {
-                                    param_spans
-                                        .push(Span::styled("↑ ", Style::default().fg(Color::Red)));
-                                }
-                                if param.flags.contains(&"defaultvalue".to_string()) {
-                                    param_spans
-                                        .push(Span::styled("* ", Style::default().fg(Color::Blue)));
-                                }
-                                if param.flags.contains(&"optional".to_string()) {
-                                    param_spans.push(Span::styled(
-                                        "? ",
-                                        Style::default().fg(Color::Yellow),
-                                    ));
-                                }
-                                param_spans.push(Span::styled(
-                                    format!("{} ", param.type_name),
-                                    Style::default().fg(Color::White),
-                                ));
-                                param_spans.push(Span::raw(&param.name));
-                                param_spans.push(Span::raw(","));
-                                lines.push(Line::from(param_spans));
-                            }
-
-                            lines.push(Line::from(vec![
-                                Span::raw("  ) -> "),
-                                Span::styled(&method.ret_type, Style::default().fg(Color::Green)),
-                            ]));
-
-                            signature_lines = lines;
-                        }
-                    }
-
-                    let signature_paragraph = Paragraph::new(signature_lines)
-                        .block(
-                            Block::default()
-                                .borders(Borders::RIGHT)
-                                .title(" Signature "),
-                        )
-                        .wrap(Wrap { trim: false });
-                    f.render_widget(signature_paragraph, bottom_chunks[0]);
-
-                    // --- Bottom Right: Parameters Table ---
-                    if !doc.parameters.is_empty() {
-                        let header_cells = ["Name", "Type", "Description"]
-                            .iter()
-                            .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow)));
-                        let header = Row::new(header_cells).height(1).bottom_margin(1);
-
-                        // Calculate column width for description
-                        // Table width is bottom_chunks[1].width
-                        // Constraints: 20%, 30%, 50%
-                        // Description column is 50% of the table width
-                        // We subtract 3 for borders/padding roughly
-                        let table_width = bottom_chunks[1].width.saturating_sub(2);
-                        let desc_col_width = (table_width as f32 * 0.5) as usize;
-                        // Ensure at least some width
-                        let desc_col_width = desc_col_width.max(10);
-
-                        let rows = doc.parameters.iter().map(|param| {
-                            // Use textwrap to calculate exact lines needed
-                            let wrapped_desc = textwrap::wrap(&param.description, desc_col_width);
-                            let height = (wrapped_desc.len() as u16).max(1);
-
-                            let desc_text = wrapped_desc.join("\n");
-
-                            let cells = vec![
-                                Cell::from(Span::styled(
-                                    &param.name,
-                                    Style::default().add_modifier(Modifier::BOLD),
-                                )),
-                                Cell::from(Span::raw(&param.type_info)),
-                                Cell::from(Text::from(desc_text)),
-                            ];
-                            Row::new(cells).height(height)
-                        });
-
-                        let table = Table::new(
-                            rows,
-                            [
-                                Constraint::Percentage(20),
-                                Constraint::Percentage(30),
-                                Constraint::Percentage(50),
-                            ],
-                        )
-                        .header(header)
-                        .block(
-                            Block::default()
-                                .borders(Borders::LEFT)
-                                .title(" Parameters "),
-                        );
-
-                        f.render_widget(table, bottom_chunks[1]);
-                    } else {
-                        f.render_widget(
-                            Paragraph::new("No parameters documented.")
-                                .block(Block::default().borders(Borders::LEFT)),
-                            bottom_chunks[1],
-                        );
-                    }
-                } else {
-                    f.render_widget(Paragraph::new("No documentation found."), main_chunks[0]);
-                }
-            }
-        } else {
-            f.render_widget(
-                Paragraph::new("Documentation provider not available."),
-                main_chunks[0],
-            );
-        }
     }
 }
 
