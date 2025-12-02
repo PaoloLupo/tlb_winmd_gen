@@ -132,7 +132,7 @@ where
     writeln!(out, "{{")?;
 
     // Standard imports often found in IDLs
-    writeln!(out, "    importlib(\"stdole2.tlb\");")?;
+    // writeln!(out, "    importlib(\"stdole2.tlb\");")?;
     writeln!(out, "")?;
 
     let count = type_lib_info.get_type_info_count();
@@ -169,7 +169,6 @@ where
     }
     writeln!(out, "")?;
 
-    // Print enums first
     let count = type_lib_info.get_type_info_count();
     for i in 0..count {
         if let Ok(type_info) = type_lib_info.get_type_info(i) {

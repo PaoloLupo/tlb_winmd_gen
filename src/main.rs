@@ -14,7 +14,7 @@ struct Args {
     tlb_path: PathBuf,
 
     /// Output directory for intermediate files (IDL, proj, cpp)
-    #[arg(long, default_value = "project")]
+    #[arg(long, default_value = "proj")]
     out_dir: PathBuf,
 
     /// Output directory for the final .winmd file
@@ -45,12 +45,10 @@ fn main() -> Result<(), error::Error> {
         idlgen::build_tlb(tlb_path, &mut writer)?;
     }
 
-    // Generate generate.proj
     let proj_path = out_dir.join("generate.proj");
     println!("Generating Project File: {}", proj_path.display());
     generate_proj(&proj_path, &lib_name, winmd_dir)?;
 
-    // Generate main.cpp
     let main_cpp_path = out_dir.join("main.cpp");
     println!("Generating main.cpp: {}", main_cpp_path.display());
     generate_main_cpp(&main_cpp_path, &lib_name)?;
@@ -61,7 +59,6 @@ fn main() -> Result<(), error::Error> {
         return Ok(());
     }
 
-    // Run dotnet build
     println!("Running dotnet build...");
     run_dotnet_build(out_dir)?;
 
@@ -70,14 +67,6 @@ fn main() -> Result<(), error::Error> {
 }
 
 fn generate_proj(path: &Path, lib_name: &str, winmd_dir: &Path) -> Result<(), error::Error> {
-    // We need relative path from .metadata to .windows/winmd for the project file if possible,
-    // or absolute path. Let's use absolute path for simplicity or relative if we can compute it.
-    // For now, let's try to use the path provided in args, assuming it's relative to CWD.
-    // The project file is in out_dir.
-
-    // To make it robust, let's just use the path string provided by user/default,
-    // but we need to adjust it because the project file is running from out_dir.
-    // Actually, let's just use the absolute path of winmd_dir to avoid relative path hell.
     let winmd_abs_path = std::fs::canonicalize(winmd_dir).unwrap_or(winmd_dir.to_path_buf());
     let winmd_file_path = winmd_abs_path.join(format!("{}.winmd", lib_name));
 
