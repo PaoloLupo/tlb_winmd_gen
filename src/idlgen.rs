@@ -407,7 +407,7 @@ where
         let type_flags = (*type_attr).wTypeFlags;
 
         writeln!(out, "    [")?;
-        writeln!(out, "      odl,")?;
+        // writeln!(out, "      odl,")?; // MIDL doesnt need this
         writeln!(out, "      uuid({:?}),", guid)?;
         if type_kind == TKIND_INTERFACE || type_kind == TKIND_DISPATCH || type_kind == TKIND_COCLASS
         {
