@@ -656,8 +656,19 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         })
         .collect();
 
+    let type_list_border_style = if app.focus == Focus::TypeList {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Types"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(type_list_border_style)
+                .title("Types"),
+        )
         .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
 
     f.render_stateful_widget(list, content_chunks[0], &mut app.list_state);
