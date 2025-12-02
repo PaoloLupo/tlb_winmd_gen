@@ -7,9 +7,8 @@ edition = "2024"
 clap = {version = "4.5.53", features = ["derive"]}
 thiserror = "2.0.17"
 windows = {version ="0.62.2", features = [
-"Win32_System_Com",
-"Win32_System_Ole",
-"Win32_System_Variant"
-
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant"
 ]}
 windows-core = "0.62.2"
