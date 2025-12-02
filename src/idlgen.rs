@@ -7,7 +7,11 @@ use windows::{
             TKIND_ALIAS, TKIND_COCLASS, TKIND_DISPATCH, TKIND_ENUM, TKIND_INTERFACE, TKIND_MODULE,
             TKIND_RECORD, TKIND_UNION, TYPEATTR, TYPEDESC, VARDESC,
         },
-        Ole::LoadTypeLib,
+        Ole::{
+            LoadTypeLib, TYPEFLAG_FAGGREGATABLE, TYPEFLAG_FDISPATCHABLE, TYPEFLAG_FDUAL,
+            TYPEFLAG_FHIDDEN, TYPEFLAG_FNONEXTENSIBLE, TYPEFLAG_FOLEAUTOMATION,
+            TYPEFLAG_FRESTRICTED, TYPEFLAGS,
+        },
         Variant::{
             VARIANT, VT_BOOL, VT_BSTR, VT_CY, VT_DATE, VT_DECIMAL, VT_DISPATCH, VT_EMPTY, VT_ERROR,
             VT_HRESULT, VT_I1, VT_I2, VT_I4, VT_I8, VT_INT, VT_LPSTR, VT_LPWSTR, VT_NULL, VT_PTR,
@@ -411,27 +415,44 @@ where
         writeln!(out, "      uuid({:?}),", guid)?;
         if type_kind == TKIND_INTERFACE || type_kind == TKIND_DISPATCH || type_kind == TKIND_COCLASS
         {
-            writeln!(
-                out,
-                "      version({}.{}),",
-                (*type_attr).wMajorVerNum,
-                (*type_attr).wMinorVerNum
-            )?;
+            if (*type_attr).wMajorVerNum != 0 || (*type_attr).wMinorVerNum > 0 {
+                writeln!(
+                    out,
+                    "      version({}.{}),",
+                    (*type_attr).wMajorVerNum,
+                    (*type_attr).wMinorVerNum
+                )?;
+            }
         }
         if !doc_string.is_empty() {
             writeln!(out, "      helpstring(\"{}\"),", doc_string)?;
         }
+        let mut attributes: Vec<&str> = Vec::new();
 
-        // Check attributes
-        if (type_flags & 0x40) != 0 {
-            writeln!(out, "      dual,")?;
-        } // TYPEFLAG_FDUAL
-        if (type_flags & 0x20) != 0 {
-            writeln!(out, "      oleautomation,")?;
-        } // TYPEFLAG_FOLEAUTOMATION
-        if (type_flags & 0x80) != 0 {
-            writeln!(out, "      nonextensible,")?;
-        } // TYPEFLAG_FNONEXTENSIBLE
+        let flags_map = [
+            (TYPEFLAG_FHIDDEN.0 as u16, "hidden"),
+            (TYPEFLAG_FDUAL.0 as u16, "dual"),
+            (TYPEFLAG_FRESTRICTED.0 as u16, "restricted"),
+            (TYPEFLAG_FNONEXTENSIBLE.0 as u16, "nonextensible"),
+            (TYPEFLAG_FOLEAUTOMATION.0 as u16, "oleautomation"),
+        ];
+
+        for (flag, attr) in flags_map {
+            if (type_flags & flag) != 0 {
+                attributes.push(attr);
+            }
+        }
+
+        if type_flags & (TYPEFLAG_FDISPATCHABLE.0 as u16 | TYPEFLAG_FDUAL.0 as u16) != 0 {
+            attributes.push("oleautomation");
+        }
+
+        if let Some((last, rest)) = attributes.split_last() {
+            for attr in rest {
+                writeln!(out, "      {},", attr)?;
+            }
+            writeln!(out, "      {}", last)?;
+        }
 
         // Custom attributes
         if let Ok(type_info2) = type_info.cast::<ITypeInfo2>() {
