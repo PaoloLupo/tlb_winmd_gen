@@ -279,7 +279,15 @@ fn parse_html(html: &str) -> DocStructure {
             // Filter out Namespace/Assembly lines which are common in this fallback area
             description = raw_desc
                 .lines()
-                .filter(|line| !line.starts_with("Namespace:") && !line.starts_with("Assembly:"))
+                .map(|line| line.trim())
+                .filter(|line| {
+                    !line.is_empty()
+                        && !line.starts_with("Namespace:")
+                        && !line.starts_with("Assembly:")
+                        && !line.starts_with("Version:")
+                        && !line.contains("(in ")
+                        && !line.contains("ETABSv1") // Filter out library name artifacts
+                })
                 .collect::<Vec<&str>>()
                 .join("\n");
         }
