@@ -27,3 +27,4 @@ cargo run -- <path_to_tlb> [options]
 - `tlb_path`: Path to the input TLB file (required).
 - `--out-dir`: Directory for intermediate files (default: "proj").
 - `--winmd-dir`: Directory for the final .winmd file (default: "out").
+
