@@ -19,12 +19,6 @@ use windows::{
 };
 use windows_core::{BSTR, HSTRING};
 
-#[derive(Debug)]
-pub struct BuildResult {
-    pub num_missing_types: usize,
-    pub num_types_not_found: usize,
-}
-
 struct TypeLibInfo {
     tlib: Option<ITypeLib>,
 }
@@ -99,7 +93,7 @@ pub fn get_library_name(tlb_path: &std::path::Path) -> Result<String, Error> {
     Ok(name.to_string())
 }
 
-pub fn build_tlb<W>(tlb_path: &std::path::Path, mut out: W) -> Result<BuildResult, Error>
+pub fn build_tlb<W>(tlb_path: &std::path::Path, mut out: W) -> Result<(), Error>
 where
     W: std::io::Write,
 {
@@ -197,11 +191,7 @@ where
     }
 
     writeln!(out, "}};")?;
-
-    Ok(BuildResult {
-        num_missing_types: 0,
-        num_types_not_found: 0,
-    })
+    Ok(())
 }
 
 fn print_type_info<W>(type_info: &ITypeInfo, out: &mut W) -> Result<(), Error>
