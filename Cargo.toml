@@ -1,5 +1,5 @@
 [package]
-name = "etabs_winmd_gen"
+name = "tlb_winmd_gen"
 version = "0.1.0"
 edition = "2024"
 
