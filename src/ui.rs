@@ -389,6 +389,8 @@ impl App {
 
                 // Select the member in the content table
                 self.member_search_query = member_name.clone();
+                self.search_target = SearchTarget::Members; // Switch focus to member search so user can see/clear it
+
                 // Need to find the index of the member in the current list
                 let member_query = member_name.to_lowercase();
                 if !self.current_methods.is_empty() {
