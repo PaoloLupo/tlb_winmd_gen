@@ -593,7 +593,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                             Focus::MethodList => app.focus = Focus::TypeList,
                             _ => {}
                         },
-                        KeyCode::Tab => app.toggle_view(),
+                        KeyCode::Tab | KeyCode::Char('v') => app.toggle_view(),
                         KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.show_global_search = true;
                             app.global_search_query.clear();
