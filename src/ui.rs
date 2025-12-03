@@ -602,7 +602,14 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
 fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0)].as_ref())
+        .constraints(
+            [
+                Constraint::Length(3),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ]
+            .as_ref(),
+        )
         .split(f.area());
 
     let search_title = match app.search_target {
@@ -622,6 +629,37 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .block(Block::default().borders(Borders::ALL).title(search_title))
         .style(Style::default().fg(search_color));
     f.render_widget(search_paragraph, main_chunks[0]);
+
+    // Footer
+    let footer_text = Line::from(vec![
+        Span::styled(
+            " Legend: ",
+            Style::default().bg(Color::White).fg(Color::Black),
+        ),
+        Span::styled(" ↓ ", Style::default().fg(Color::Green)),
+        Span::raw("In "),
+        Span::styled("↑ ", Style::default().fg(Color::Red)),
+        Span::raw("Out "),
+        Span::styled("? ", Style::default().fg(Color::Yellow)),
+        Span::raw("Optional "),
+        Span::styled("= ", Style::default().fg(Color::Blue)),
+        Span::raw("Default "),
+        Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " Keys: ",
+            Style::default().bg(Color::White).fg(Color::Black),
+        ),
+        Span::styled(" Tab/V ", Style::default().fg(Color::Cyan)),
+        Span::raw("Toggle View "),
+        Span::styled(" Ctrl+F ", Style::default().fg(Color::Cyan)),
+        Span::raw("Switch Search "),
+        Span::styled(" Ctrl+P ", Style::default().fg(Color::Cyan)),
+        Span::raw("Global Search "),
+        Span::styled(" Esc ", Style::default().fg(Color::Cyan)),
+        Span::raw("Exit "),
+    ]);
+    let footer = Paragraph::new(footer_text).style(Style::default().bg(Color::DarkGray));
+    f.render_widget(footer, main_chunks[2]);
 
     let content_chunks = Layout::default()
         .direction(Direction::Horizontal)
