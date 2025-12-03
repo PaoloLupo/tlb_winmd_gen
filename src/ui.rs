@@ -815,7 +815,12 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                                 param_spans
                                     .push(Span::styled("↑ ", Style::default().fg(Color::Red)));
                             }
-                            if param.flags.contains(&"defaultvalue".to_string()) {
+                            if let Some(default_val) = &param.default_value {
+                                param_spans.push(Span::styled(
+                                    format!("= {} ", default_val),
+                                    Style::default().fg(Color::Blue),
+                                ));
+                            } else if param.flags.contains(&"defaultvalue".to_string()) {
                                 param_spans
                                     .push(Span::styled("* ", Style::default().fg(Color::Blue)));
                             }
