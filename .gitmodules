@@ -1,3 +1,0 @@
-[submodule "crates/chmlib"]
-	path = crates/chmlib
-	url = https://github.com/PaoloLupo/chmlib
