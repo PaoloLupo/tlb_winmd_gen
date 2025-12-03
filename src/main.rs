@@ -1,4 +1,3 @@
-mod chm_doc;
 mod error;
 mod idlgen;
 mod ui;
@@ -27,10 +26,6 @@ struct Args {
     #[arg(long)]
     ui: bool,
 
-    /// Path to CHM documentation file
-    #[arg(long)]
-    chm: Option<String>,
-
     /// Import stdole2.tlb in the generated IDL
     #[arg(long)]
     import_stdole: bool,
@@ -41,7 +36,7 @@ fn main() -> Result<(), error::Error> {
     let tlb_path = std::path::Path::new(&args.tlb_path);
 
     if args.ui {
-        if let Err(e) = ui::run(tlb_path.to_path_buf(), args.chm) {
+        if let Err(e) = ui::run(tlb_path.to_path_buf()) {
             eprintln!("Error running TUI: {}", e);
             std::process::exit(1);
         }

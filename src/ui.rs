@@ -1,4 +1,3 @@
-use crate::chm_doc::ChmDocumentationProvider;
 use crate::idlgen::{EnumItemInfo, MethodInfo, TypeLibInfo};
 use crossterm::{
     event::{
@@ -49,7 +48,6 @@ struct SearchItem {
 
 struct App {
     type_lib_info: TypeLibInfo,
-    doc_provider: Option<ChmDocumentationProvider>,
     types: Vec<(String, String)>,                 // Name, Kind
     filtered_types: Vec<(usize, String, String)>, // Original Index, Name, Kind
     list_state: ListState,
@@ -80,7 +78,7 @@ struct App {
 }
 
 impl App {
-    fn new(tlb_path: PathBuf, chm_path: Option<String>) -> Result<Self, Box<dyn Error>> {
+    fn new(tlb_path: PathBuf) -> Result<Self, Box<dyn Error>> {
         let mut type_lib_info = TypeLibInfo::new();
         type_lib_info.load_type_lib(&tlb_path)?;
 
@@ -126,18 +124,8 @@ impl App {
             }
         }
 
-        let doc_provider = if let Some(path) = chm_path {
-            match ChmDocumentationProvider::new(&path) {
-                Ok(provider) => Some(provider),
-                Err(_e) => None,
-            }
-        } else {
-            None
-        };
-
         let mut app = App {
             type_lib_info,
-            doc_provider,
             types,
             filtered_types: Vec::new(),
             list_state: ListState::default(),
@@ -491,7 +479,7 @@ impl App {
     }
 }
 
-pub fn run(tlb_path: PathBuf, chm_path: Option<String>) -> Result<(), Box<dyn Error>> {
+pub fn run(tlb_path: PathBuf) -> Result<(), Box<dyn Error>> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -500,7 +488,7 @@ pub fn run(tlb_path: PathBuf, chm_path: Option<String>) -> Result<(), Box<dyn Er
     let mut terminal = Terminal::new(backend)?;
 
     // Create app
-    let app = App::new(tlb_path, chm_path)?;
+    let app = App::new(tlb_path)?;
     let res = run_app(&mut terminal, app);
 
     // Restore terminal
@@ -849,46 +837,6 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                             Span::styled(&method.ret_type, Style::default().fg(Color::Green)),
                         ]));
                         lines.push(Line::from("")); // Spacer
-
-                        // 2. Documentation
-                        if let Some(provider) = &app.doc_provider {
-                            if let Some(doc) = provider.get_doc(&method.name) {
-                                lines.push(Line::from(Span::styled(
-                                    "Description:",
-                                    Style::default()
-                                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-                                )));
-                                lines.push(Line::from(doc.description));
-                                lines.push(Line::from(""));
-
-                                if !doc.parameters.is_empty() {
-                                    lines.push(Line::from(Span::styled(
-                                        "Parameters:",
-                                        Style::default()
-                                            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-                                    )));
-                                    for param in doc.parameters {
-                                        lines.push(Line::from(vec![
-                                            Span::styled(
-                                                format!("- {}: ", param.name),
-                                                Style::default().fg(Color::Cyan),
-                                            ),
-                                            Span::raw(param.description),
-                                        ]));
-                                    }
-                                }
-                            } else {
-                                lines.push(Line::from(Span::styled(
-                                    "No documentation found.",
-                                    Style::default().fg(Color::DarkGray),
-                                )));
-                            }
-                        } else {
-                            lines.push(Line::from(Span::styled(
-                                "Documentation provider not available.",
-                                Style::default().fg(Color::DarkGray),
-                            )));
-                        }
 
                         // Create a Paragraph with the lines
                         // We need to handle scrolling for the details panel
