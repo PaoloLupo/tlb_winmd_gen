@@ -359,11 +359,12 @@ where
                         writeln!(out, "    interface {};", name)?;
                     }
                     TKIND_DISPATCH => {
-                        let is_dual = (type_flags & 0x40) != 0; // TYPEFLAG_FDUAL
+                        let is_dual = (type_flags & TYPEFLAG_FDUAL.0 as u16) != 0; // TYPEFLAG_FDUAL
                         if is_dual {
                             writeln!(out, "    interface {};", name)?;
                         } else {
-                            writeln!(out, "    dispinterface {};", name)?;
+                            // TODO: dispinterface
+                            // writeln!(out, "    dispinterface {};", name)?;
                         }
                     }
                     TKIND_COCLASS => {
@@ -418,9 +419,10 @@ where
         let guid = (*type_attr).guid;
         let (_, doc_string) = get_type_documentation(type_info, -1);
         let type_flags = (*type_attr).wTypeFlags;
+        let is_dual = (type_flags & TYPEFLAG_FDUAL.0 as u16) != 0;
 
         if type_kind == TKIND_INTERFACE
-            || type_kind == TKIND_DISPATCH
+            || (type_kind == TKIND_DISPATCH && is_dual)
             || type_kind == TKIND_COCLASS
             || type_kind == TKIND_ENUM
         {
@@ -545,7 +547,7 @@ where
                     }
                     writeln!(out, "    }};")?;
                 } else {
-                    // // Pure dispinterface
+                    // TODO: dispinterface
                     // writeln!(out, "    dispinterface {} {{", name)?;
 
                     // if (*type_attr).cVars > 0 {
@@ -613,12 +615,20 @@ where
                 writeln!(out, "    }};")?;
             }
             TKIND_ALIAS => {
-                if let Ok(_) = type_info
-                    .GetRefTypeOfImplType(0)
-                    .and_then(|href| type_info.GetRefTypeInfo(href))
-                {
-                    writeln!(out, "    typedef {};", name)?;
+                let alias_type_name = type_desc_to_string(type_info, &(*type_attr).tdescAlias);
+                let mut attributes = Vec::new();
+
+                if (type_flags & TYPEFLAG_FHIDDEN.0 as u16) == 0 {
+                    attributes.push("public");
                 }
+
+                let attr_str = if !attributes.is_empty() {
+                    format!("[{}] ", attributes.join(", "))
+                } else {
+                    String::new()
+                };
+
+                writeln!(out, "    typedef {}{} {};", attr_str, alias_type_name, name)?;
             }
             TKIND_RECORD => {
                 writeln!(out, "    typedef struct tag{} {{", name)?;
