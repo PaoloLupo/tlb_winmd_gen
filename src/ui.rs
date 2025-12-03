@@ -12,7 +12,7 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::{
         Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Scrollbar,
         ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
@@ -37,6 +37,7 @@ enum Focus {
     TypeList,
     MethodList,
     Details,
+    IdlView,
 }
 
 struct SearchItem {
@@ -47,7 +48,6 @@ struct SearchItem {
 }
 
 struct App {
-    tlb_path: PathBuf,
     type_lib_info: TypeLibInfo,
     doc_provider: Option<ChmDocumentationProvider>,
     types: Vec<(String, String)>,                 // Name, Kind
@@ -55,6 +55,8 @@ struct App {
     list_state: ListState,
     list_scroll_state: ScrollbarState, // Scrollbar for Type List
     current_idl: String,
+    idl_scroll_offset: u16,
+    idl_scroll_state: ScrollbarState,
     current_methods: Vec<MethodInfo>,
     current_enums: Vec<EnumItemInfo>,
     search_query: String,
@@ -134,7 +136,6 @@ impl App {
         };
 
         let mut app = App {
-            tlb_path,
             type_lib_info,
             doc_provider,
             types,
@@ -142,6 +143,8 @@ impl App {
             list_state: ListState::default(),
             list_scroll_state: ScrollbarState::default(),
             current_idl: String::new(),
+            idl_scroll_offset: 0,
+            idl_scroll_state: ScrollbarState::default(),
             current_methods: Vec::new(),
             current_enums: Vec::new(),
             search_query: String::new(),
@@ -213,6 +216,8 @@ impl App {
                 self.method_list_scroll_state = ScrollbarState::default();
                 self.details_scroll_offset = 0;
                 self.details_scroll_state = ScrollbarState::default();
+                self.idl_scroll_offset = 0;
+                self.idl_scroll_state = ScrollbarState::default();
 
                 self.content_table_state.select(None);
                 self.content_scroll_state = ScrollbarState::default();
@@ -283,6 +288,12 @@ impl App {
                     .details_scroll_state
                     .position(self.details_scroll_offset as usize);
             }
+            Focus::IdlView => {
+                self.idl_scroll_offset = self.idl_scroll_offset.saturating_add(1);
+                self.idl_scroll_state = self
+                    .idl_scroll_state
+                    .position(self.idl_scroll_offset as usize);
+            }
         }
     }
 
@@ -339,6 +350,12 @@ impl App {
                 self.details_scroll_state = self
                     .details_scroll_state
                     .position(self.details_scroll_offset as usize);
+            }
+            Focus::IdlView => {
+                self.idl_scroll_offset = self.idl_scroll_offset.saturating_sub(1);
+                self.idl_scroll_state = self
+                    .idl_scroll_state
+                    .position(self.idl_scroll_offset as usize);
             }
         }
     }
@@ -472,50 +489,6 @@ impl App {
             }
         }
     }
-
-    fn get_selected_name(&self) -> Option<String> {
-        match self.focus {
-            Focus::TypeList => {
-                if let Some(idx) = self.list_state.selected() {
-                    if idx < self.filtered_types.len() {
-                        return Some(self.filtered_types[idx].1.clone());
-                    }
-                }
-            }
-            Focus::MethodList | Focus::Details => {
-                let member_query = self.member_search_query.to_lowercase();
-                if !self.current_methods.is_empty() {
-                    if let Some(idx) = self.method_list_state.selected() {
-                        let filtered_methods: Vec<&MethodInfo> = self
-                            .current_methods
-                            .iter()
-                            .filter(|m| m.name.to_lowercase().contains(&member_query))
-                            .collect();
-                        if idx < filtered_methods.len() {
-                            return Some(filtered_methods[idx].name.clone());
-                        }
-                    }
-                } else if !self.current_enums.is_empty() {
-                    if let Some(idx) = self.content_table_state.selected() {
-                        let filtered_enums: Vec<&EnumItemInfo> = self
-                            .current_enums
-                            .iter()
-                            .filter(|e| e.name.to_lowercase().contains(&member_query))
-                            .collect();
-                        if idx < filtered_enums.len() {
-                            return Some(filtered_enums[idx].name.clone());
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    fn is_method_selected(&self) -> bool {
-        (self.focus == Focus::MethodList || self.focus == Focus::Details)
-            && !self.current_methods.is_empty()
-    }
 }
 
 pub fn run(tlb_path: PathBuf, chm_path: Option<String>) -> Result<(), Box<dyn Error>> {
@@ -580,7 +553,13 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                         KeyCode::Down => app.next(),
                         KeyCode::Up => app.previous(),
                         KeyCode::Right => match app.focus {
-                            Focus::TypeList => app.focus = Focus::MethodList,
+                            Focus::TypeList => {
+                                if app.view_mode == ViewMode::Idl {
+                                    app.focus = Focus::IdlView;
+                                } else {
+                                    app.focus = Focus::MethodList;
+                                }
+                            }
                             Focus::MethodList => {
                                 if !app.current_methods.is_empty() {
                                     app.focus = Focus::Details;
@@ -591,6 +570,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                         KeyCode::Left => match app.focus {
                             Focus::Details => app.focus = Focus::MethodList,
                             Focus::MethodList => app.focus = Focus::TypeList,
+                            Focus::IdlView => app.focus = Focus::TypeList,
                             _ => {}
                         },
                         KeyCode::Tab | KeyCode::Char('v') => app.toggle_view(),
@@ -705,10 +685,38 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
 
     match app.view_mode {
         ViewMode::Idl => {
+            let idl_border_style = if app.focus == Focus::IdlView {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            };
+
             let idl_paragraph = Paragraph::new(app.current_idl.as_str())
-                .block(Block::default().borders(Borders::ALL).title("IDL Preview"))
-                .wrap(Wrap { trim: false });
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(idl_border_style)
+                        .title("IDL Preview"),
+                )
+                .wrap(Wrap { trim: false })
+                .scroll((app.idl_scroll_offset, 0));
             f.render_widget(idl_paragraph, right_area);
+
+            // Scrollbar for IDL
+            let line_count = app.current_idl.lines().count();
+            app.idl_scroll_state = app.idl_scroll_state.content_length(line_count);
+            app.idl_scroll_state = app
+                .idl_scroll_state
+                .position(app.idl_scroll_offset as usize);
+
+            f.render_stateful_widget(
+                Scrollbar::default()
+                    .orientation(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(Some("↑"))
+                    .end_symbol(Some("↓")),
+                right_area,
+                &mut app.idl_scroll_state,
+            );
         }
         ViewMode::Structured => {
             if !app.current_methods.is_empty() {
