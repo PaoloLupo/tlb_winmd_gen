@@ -11,7 +11,7 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::{
         Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Scrollbar,
         ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
@@ -34,7 +34,9 @@ enum SearchTarget {
 #[derive(PartialEq)]
 enum Focus {
     TypeList,
-    Content,
+    MethodList,
+    Details,
+    IdlView,
 }
 
 struct SearchItem {
@@ -45,13 +47,14 @@ struct SearchItem {
 }
 
 struct App {
-    tlb_path: PathBuf,
     type_lib_info: TypeLibInfo,
     types: Vec<(String, String)>,                 // Name, Kind
     filtered_types: Vec<(usize, String, String)>, // Original Index, Name, Kind
     list_state: ListState,
     list_scroll_state: ScrollbarState, // Scrollbar for Type List
     current_idl: String,
+    idl_scroll_offset: u16,
+    idl_scroll_state: ScrollbarState,
     current_methods: Vec<MethodInfo>,
     current_enums: Vec<EnumItemInfo>,
     search_query: String,
@@ -59,8 +62,12 @@ struct App {
     view_mode: ViewMode,
     search_target: SearchTarget,
     focus: Focus,
-    content_table_state: TableState,
-    content_scroll_state: ScrollbarState,
+    method_list_state: ListState, // State for Method List (Middle Panel)
+    method_list_scroll_state: ScrollbarState, // Scrollbar for Method List
+    details_scroll_offset: u16,   // Scroll offset for Details Panel
+    details_scroll_state: ScrollbarState, // Scrollbar for Details Panel
+    content_table_state: TableState, // Kept for Enums
+    content_scroll_state: ScrollbarState, // Kept for Enums
     // Global Search
     all_search_items: Vec<SearchItem>,
     show_global_search: bool,
@@ -81,7 +88,15 @@ impl App {
 
         for i in 0..count {
             if let Ok((name, kind)) = type_lib_info.get_type_name_and_kind(i) {
-                types.push((name.clone(), kind));
+                types.push((name.clone(), kind.clone()));
+
+                // Index the type itself
+                all_search_items.push(SearchItem {
+                    type_index: i as usize,
+                    type_name: name.clone(),
+                    member_name: name.clone(), // For types, member_name is the same as type_name
+                    kind: kind.clone(),
+                });
 
                 // Pre-index methods
                 if let Ok(methods) = type_lib_info.get_type_methods(i) {
@@ -102,7 +117,7 @@ impl App {
                             type_index: i as usize,
                             type_name: name.clone(),
                             member_name: item.name,
-                            kind: "Enum".to_string(),
+                            kind: "EnumValue".to_string(),
                         });
                     }
                 }
@@ -110,13 +125,14 @@ impl App {
         }
 
         let mut app = App {
-            tlb_path,
             type_lib_info,
             types,
             filtered_types: Vec::new(),
             list_state: ListState::default(),
             list_scroll_state: ScrollbarState::default(),
             current_idl: String::new(),
+            idl_scroll_offset: 0,
+            idl_scroll_state: ScrollbarState::default(),
             current_methods: Vec::new(),
             current_enums: Vec::new(),
             search_query: String::new(),
@@ -124,6 +140,10 @@ impl App {
             view_mode: ViewMode::Structured,
             search_target: SearchTarget::Types,
             focus: Focus::TypeList,
+            method_list_state: ListState::default(),
+            method_list_scroll_state: ScrollbarState::default(),
+            details_scroll_offset: 0,
+            details_scroll_state: ScrollbarState::default(),
             content_table_state: TableState::default(),
             content_scroll_state: ScrollbarState::default(),
             all_search_items,
@@ -133,9 +153,7 @@ impl App {
             global_search_state: ListState::default(),
             global_search_scroll_state: ScrollbarState::default(),
         };
-
         app.update_filter();
-
         Ok(app)
     }
 
@@ -149,54 +167,61 @@ impl App {
             .map(|(i, (name, kind))| (i, name.clone(), kind.clone()))
             .collect();
 
+        self.list_state.select(None);
+        self.list_scroll_state = self
+            .list_scroll_state
+            .content_length(self.filtered_types.len());
         if !self.filtered_types.is_empty() {
             self.list_state.select(Some(0));
+            self.update_selection();
         } else {
-            self.list_state.select(None);
+            self.current_idl.clear();
+            self.current_methods.clear();
+            self.current_enums.clear();
+            self.content_table_state.select(None);
         }
-        self.update_selection();
     }
 
     fn update_selection(&mut self) {
-        self.content_table_state.select(None); // Reset content selection on type change
         if let Some(selected_idx) = self.list_state.selected() {
             if let Some((original_idx, _, _)) = self.filtered_types.get(selected_idx) {
-                let idx = *original_idx as u32;
-                if let Ok(idl) = self.type_lib_info.get_type_idl(idx) {
+                if let Ok(idl) = self.type_lib_info.get_type_idl(*original_idx as u32) {
                     self.current_idl = idl;
-                } else {
-                    self.current_idl = "Error loading IDL".to_string();
                 }
-
-                if let Ok(methods) = self.type_lib_info.get_type_methods(idx) {
+                if let Ok(methods) = self.type_lib_info.get_type_methods(*original_idx as u32) {
                     self.current_methods = methods;
                 } else {
-                    self.current_methods = Vec::new();
+                    self.current_methods.clear();
                 }
-
-                if let Ok(enums) = self.type_lib_info.get_type_enums(idx) {
+                if let Ok(enums) = self.type_lib_info.get_type_enums(*original_idx as u32) {
                     self.current_enums = enums;
                 } else {
-                    self.current_enums = Vec::new();
+                    self.current_enums.clear();
                 }
-            } else {
-                self.current_idl = String::new();
-                self.current_methods = Vec::new();
-                self.current_enums = Vec::new();
+
+                // Reset content selection and scroll
+                self.method_list_state.select(None);
+                self.method_list_scroll_state = ScrollbarState::default();
+                self.details_scroll_offset = 0;
+                self.details_scroll_state = ScrollbarState::default();
+                self.idl_scroll_offset = 0;
+                self.idl_scroll_state = ScrollbarState::default();
+
+                self.content_table_state.select(None);
+                self.content_scroll_state = ScrollbarState::default();
+
+                if !self.current_methods.is_empty() {
+                    self.method_list_state.select(Some(0));
+                } else if !self.current_enums.is_empty() {
+                    self.content_table_state.select(Some(0));
+                }
             }
-        } else {
-            self.current_idl = String::new();
-            self.current_methods = Vec::new();
-            self.current_enums = Vec::new();
         }
     }
 
     fn next(&mut self) {
         match self.focus {
             Focus::TypeList => {
-                if self.filtered_types.is_empty() {
-                    return;
-                }
                 let i = match self.list_state.selected() {
                     Some(i) => {
                         if i >= self.filtered_types.len() - 1 {
@@ -208,23 +233,31 @@ impl App {
                     None => 0,
                 };
                 self.list_state.select(Some(i));
+                self.list_scroll_state = self.list_scroll_state.position(i);
                 self.update_selection();
             }
-            Focus::Content => {
-                if self.view_mode == ViewMode::Structured {
-                    let count = if !self.current_methods.is_empty() {
-                        self.current_methods.len()
-                    } else {
-                        self.current_enums.len()
+            Focus::MethodList => {
+                if !self.current_methods.is_empty() {
+                    let i = match self.method_list_state.selected() {
+                        Some(i) => {
+                            if i >= self.current_methods.len() - 1 {
+                                0
+                            } else {
+                                i + 1
+                            }
+                        }
+                        None => 0,
                     };
-
-                    if count == 0 {
-                        return;
-                    }
-
+                    self.method_list_state.select(Some(i));
+                    self.method_list_scroll_state = self.method_list_scroll_state.position(i);
+                    // Reset details scroll when changing method
+                    self.details_scroll_offset = 0;
+                    self.details_scroll_state = ScrollbarState::default();
+                } else if !self.current_enums.is_empty() {
+                    // Enums use content_table_state (2 panel layout)
                     let i = match self.content_table_state.selected() {
                         Some(i) => {
-                            if i >= count - 1 {
+                            if i >= self.current_enums.len() - 1 {
                                 0
                             } else {
                                 i + 1
@@ -233,7 +266,21 @@ impl App {
                         None => 0,
                     };
                     self.content_table_state.select(Some(i));
+                    self.content_scroll_state = self.content_scroll_state.position(i);
                 }
+            }
+            Focus::Details => {
+                // Scroll details
+                self.details_scroll_offset = self.details_scroll_offset.saturating_add(1);
+                self.details_scroll_state = self
+                    .details_scroll_state
+                    .position(self.details_scroll_offset as usize);
+            }
+            Focus::IdlView => {
+                self.idl_scroll_offset = self.idl_scroll_offset.saturating_add(1);
+                self.idl_scroll_state = self
+                    .idl_scroll_state
+                    .position(self.idl_scroll_offset as usize);
             }
         }
     }
@@ -241,9 +288,6 @@ impl App {
     fn previous(&mut self) {
         match self.focus {
             Focus::TypeList => {
-                if self.filtered_types.is_empty() {
-                    return;
-                }
                 let i = match self.list_state.selected() {
                     Some(i) => {
                         if i == 0 {
@@ -255,24 +299,30 @@ impl App {
                     None => 0,
                 };
                 self.list_state.select(Some(i));
+                self.list_scroll_state = self.list_scroll_state.position(i);
                 self.update_selection();
             }
-            Focus::Content => {
-                if self.view_mode == ViewMode::Structured {
-                    let count = if !self.current_methods.is_empty() {
-                        self.current_methods.len()
-                    } else {
-                        self.current_enums.len()
+            Focus::MethodList => {
+                if !self.current_methods.is_empty() {
+                    let i = match self.method_list_state.selected() {
+                        Some(i) => {
+                            if i == 0 {
+                                self.current_methods.len() - 1
+                            } else {
+                                i - 1
+                            }
+                        }
+                        None => 0,
                     };
-
-                    if count == 0 {
-                        return;
-                    }
-
+                    self.method_list_state.select(Some(i));
+                    self.method_list_scroll_state = self.method_list_scroll_state.position(i);
+                    self.details_scroll_offset = 0;
+                    self.details_scroll_state = ScrollbarState::default();
+                } else if !self.current_enums.is_empty() {
                     let i = match self.content_table_state.selected() {
                         Some(i) => {
                             if i == 0 {
-                                count - 1
+                                self.current_enums.len() - 1
                             } else {
                                 i - 1
                             }
@@ -280,7 +330,20 @@ impl App {
                         None => 0,
                     };
                     self.content_table_state.select(Some(i));
+                    self.content_scroll_state = self.content_scroll_state.position(i);
                 }
+            }
+            Focus::Details => {
+                self.details_scroll_offset = self.details_scroll_offset.saturating_sub(1);
+                self.details_scroll_state = self
+                    .details_scroll_state
+                    .position(self.details_scroll_offset as usize);
+            }
+            Focus::IdlView => {
+                self.idl_scroll_offset = self.idl_scroll_offset.saturating_sub(1);
+                self.idl_scroll_state = self
+                    .idl_scroll_state
+                    .position(self.idl_scroll_offset as usize);
             }
         }
     }
@@ -359,9 +422,9 @@ impl App {
     fn select_global_result(&mut self) {
         if let Some(selected_idx) = self.global_search_state.selected() {
             if let Some(&item_idx) = self.global_search_results.get(selected_idx) {
-                let (type_index, member_name) =
+                let (type_index, member_name, kind) =
                     if let Some(item) = self.all_search_items.get(item_idx) {
-                        (item.type_index, item.member_name.clone())
+                        (item.type_index, item.member_name.clone(), item.kind.clone())
                     } else {
                         return;
                     };
@@ -379,29 +442,37 @@ impl App {
                     self.update_selection();
                 }
 
-                self.view_mode = ViewMode::Structured;
-                self.member_search_query = member_name.clone();
-                self.search_target = SearchTarget::Members;
-                self.focus = Focus::Content; // Focus content to show selection
+                // If it's a method or enum value, select it in the content table
+                if kind == "Method" || kind == "EnumValue" {
+                    self.member_search_query = member_name.clone();
+                    self.search_target = SearchTarget::Members; // Switch focus to member search so user can see/clear it
 
-                // Try to auto-scroll to the member
-                let member_query = member_name.to_lowercase();
-                if !self.current_methods.is_empty() {
-                    if let Some(pos) = self
-                        .current_methods
-                        .iter()
-                        .position(|m| m.name.to_lowercase() == member_query)
-                    {
-                        self.content_table_state.select(Some(pos));
+                    // Need to find the index of the member in the current list
+                    let member_query = member_name.to_lowercase();
+                    if !self.current_methods.is_empty() {
+                        if let Some(pos) = self
+                            .current_methods
+                            .iter()
+                            .position(|m| m.name.to_lowercase() == member_query)
+                        {
+                            self.method_list_state.select(Some(pos));
+                        }
+                    } else if !self.current_enums.is_empty() {
+                        if let Some(pos) = self
+                            .current_enums
+                            .iter()
+                            .position(|e| e.name.to_lowercase() == member_query)
+                        {
+                            self.content_table_state.select(Some(pos));
+                        }
                     }
-                } else if !self.current_enums.is_empty() {
-                    if let Some(pos) = self
-                        .current_enums
-                        .iter()
-                        .position(|e| e.name.to_lowercase() == member_query)
-                    {
-                        self.content_table_state.select(Some(pos));
-                    }
+                } else {
+                    // It's a type (Interface, Enum, Dispatch, etc.)
+                    // We already selected the type in the left panel.
+                    // Just ensure we are focusing on the type list and clear member search
+                    self.member_search_query.clear();
+                    self.search_target = SearchTarget::Types;
+                    self.focus = Focus::TypeList;
                 }
             }
         }
@@ -417,12 +488,8 @@ pub fn run(tlb_path: PathBuf) -> Result<(), Box<dyn Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app
-    let app = App::new(tlb_path);
-
-    let res = match app {
-        Ok(mut app) => run_app(&mut terminal, &mut app),
-        Err(e) => Err(e),
-    };
+    let app = App::new(tlb_path)?;
+    let res = run_app(&mut terminal, app);
 
     // Restore terminal
     disable_raw_mode()?;
@@ -434,15 +501,15 @@ pub fn run(tlb_path: PathBuf) -> Result<(), Box<dyn Error>> {
     terminal.show_cursor()?;
 
     if let Err(err) = res {
-        println!("{:?}", err);
+        println!("{:?}", err)
     }
 
     Ok(())
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<(), Box<dyn Error>> {
+fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     loop {
-        terminal.draw(|f| ui(f, app))?;
+        terminal.draw(|f| ui(f, &mut app))?;
 
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
@@ -473,9 +540,28 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<(), 
                         KeyCode::Esc => return Ok(()),
                         KeyCode::Down => app.next(),
                         KeyCode::Up => app.previous(),
-                        KeyCode::Right => app.focus = Focus::Content,
-                        KeyCode::Left => app.focus = Focus::TypeList,
-                        KeyCode::Tab => app.toggle_view(),
+                        KeyCode::Right => match app.focus {
+                            Focus::TypeList => {
+                                if app.view_mode == ViewMode::Idl {
+                                    app.focus = Focus::IdlView;
+                                } else {
+                                    app.focus = Focus::MethodList;
+                                }
+                            }
+                            Focus::MethodList => {
+                                if !app.current_methods.is_empty() {
+                                    app.focus = Focus::Details;
+                                }
+                            }
+                            _ => {}
+                        },
+                        KeyCode::Left => match app.focus {
+                            Focus::Details => app.focus = Focus::MethodList,
+                            Focus::MethodList => app.focus = Focus::TypeList,
+                            Focus::IdlView => app.focus = Focus::TypeList,
+                            _ => {}
+                        },
+                        KeyCode::Tab | KeyCode::Char('v') => app.toggle_view(),
                         KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.show_global_search = true;
                             app.global_search_query.clear();
@@ -483,6 +569,9 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<(), 
                         }
                         KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.toggle_search_target();
+                        }
+                        KeyCode::Enter => {
+                            // Enter key logic if needed, e.g. select global search result
                         }
                         KeyCode::Char(c) => match app.search_target {
                             SearchTarget::Types => {
@@ -552,8 +641,8 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         })
         .collect();
 
-    let list_border_style = if app.focus == Focus::TypeList {
-        Style::default().fg(Color::Cyan)
+    let type_list_border_style = if app.focus == Focus::TypeList {
+        Style::default().fg(Color::Yellow)
     } else {
         Style::default()
     };
@@ -562,26 +651,14 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(list_border_style)
-                .title(format!("Types - {}", app.tlb_path.display())),
+                .border_style(type_list_border_style)
+                .title("Types"),
         )
-        .highlight_style(
-            Style::default()
-                .bg(Color::Blue) // Unified Blue
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(">> ");
+        .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
 
     f.render_stateful_widget(list, content_chunks[0], &mut app.list_state);
 
-    // Render Scrollbar for Type List
-    app.list_scroll_state = app
-        .list_scroll_state
-        .content_length(app.filtered_types.len());
-    if let Some(i) = app.list_state.selected() {
-        app.list_scroll_state = app.list_scroll_state.position(i);
-    }
+    // Render Scrollbar for Types
     f.render_stateful_widget(
         Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
@@ -591,138 +668,210 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         &mut app.list_scroll_state,
     );
 
-    // Right panel
-    let content_border_style = if app.focus == Focus::Content {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default()
-    };
+    // Right panel area (split further if needed)
+    let right_area = content_chunks[1];
 
     match app.view_mode {
         ViewMode::Idl => {
+            let idl_border_style = if app.focus == Focus::IdlView {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            };
+
             let idl_paragraph = Paragraph::new(app.current_idl.as_str())
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .border_style(content_border_style)
+                        .border_style(idl_border_style)
                         .title("IDL Preview"),
                 )
-                .wrap(Wrap { trim: false });
-            f.render_widget(idl_paragraph, content_chunks[1]);
+                .wrap(Wrap { trim: false })
+                .scroll((app.idl_scroll_offset, 0));
+            f.render_widget(idl_paragraph, right_area);
+
+            // Scrollbar for IDL
+            let line_count = app.current_idl.lines().count();
+            app.idl_scroll_state = app.idl_scroll_state.content_length(line_count);
+            app.idl_scroll_state = app
+                .idl_scroll_state
+                .position(app.idl_scroll_offset as usize);
+
+            f.render_stateful_widget(
+                Scrollbar::default()
+                    .orientation(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(Some("↑"))
+                    .end_symbol(Some("↓")),
+                right_area,
+                &mut app.idl_scroll_state,
+            );
         }
         ViewMode::Structured => {
-            let member_query = app.member_search_query.to_lowercase();
-
             if !app.current_methods.is_empty() {
-                let header_cells = ["Method Signature"]
-                    .iter()
-                    .map(|h| Cell::from(*h).style(Style::default().fg(Color::White))); // White text for header
-                let header = Row::new(header_cells)
-                    .style(Style::default().bg(Color::Blue)) // Unified Blue for header
-                    .height(1);
+                // 3-Panel Layout for Methods
+                // Split right_area into Method List (Middle) and Details (Right)
+                let method_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(40), Constraint::Percentage(60)].as_ref())
+                    .split(right_area);
 
+                // --- Middle Panel: Method List ---
+                let member_query = app.member_search_query.to_lowercase();
                 let filtered_methods: Vec<&MethodInfo> = app
                     .current_methods
                     .iter()
                     .filter(|m| m.name.to_lowercase().contains(&member_query))
                     .collect();
 
-                let rows = filtered_methods.iter().map(|method| {
-                    // Format:
-                    // ƒ Name
-                    //     ↓ Type Param
-                    //     ↑ Type Param
-                    //     -> ReturnType
-                    let mut lines = Vec::new();
+                let method_items: Vec<ListItem> = filtered_methods
+                    .iter()
+                    .map(|m| {
+                        ListItem::new(Line::from(vec![
+                            Span::styled("ƒ ", Style::default().fg(Color::Magenta)),
+                            Span::raw(&m.name),
+                        ]))
+                    })
+                    .collect();
 
-                    // Line 1: Function Name
-                    lines.push(Line::from(vec![
-                        Span::styled("ƒ ", Style::default().fg(Color::Magenta)),
-                        Span::styled(
-                            &method.name,
-                            Style::default()
-                                .fg(Color::Gray)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(" ("),
-                    ]));
+                let method_border_style = if app.focus == Focus::MethodList {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
 
-                    // Params (indented)
-                    for param in &method.params {
-                        let mut param_spans = Vec::new();
-                        param_spans.push(Span::raw("    ")); // Indentation
-
-                        // Icons for flags
-                        if param.flags.contains(&"in".to_string()) {
-                            param_spans.push(Span::styled("↓ ", Style::default().fg(Color::Green)));
-                        }
-                        if param.flags.contains(&"out".to_string()) {
-                            param_spans.push(Span::styled("↑ ", Style::default().fg(Color::Red)));
-                        }
-                        if param.flags.contains(&"defaultvalue".to_string()) {
-                            param_spans.push(Span::styled("* ", Style::default().fg(Color::Blue)));
-                        }
-                        if param.flags.contains(&"optional".to_string()) {
-                            param_spans
-                                .push(Span::styled("? ", Style::default().fg(Color::Yellow)));
-                        }
-
-                        param_spans.push(Span::styled(
-                            format!("{} ", param.type_name),
-                            Style::default().fg(Color::White),
-                        ));
-                        param_spans.push(Span::raw(&param.name));
-                        param_spans.push(Span::raw(","));
-
-                        lines.push(Line::from(param_spans));
-                    }
-
-                    // Return type
-                    lines.push(Line::from(vec![
-                        Span::raw("  ) -> "),
-                        Span::styled(&method.ret_type, Style::default().fg(Color::Green)),
-                    ]));
-
-                    // Add an empty line separator
-                    lines.push(Line::from(""));
-
-                    let height = lines.len() as u16;
-                    Row::new(vec![Cell::from(Text::from(lines))]).height(height)
-                });
-
-                let table = Table::new(rows, [Constraint::Percentage(100)])
-                    .header(header)
+                let method_list = List::new(method_items)
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .border_style(content_border_style)
-                            .title("Methods"),
+                            .border_style(method_border_style)
+                            .title("Functions"),
                     )
-                    .row_highlight_style(Style::default().bg(Color::Blue)); // Unified Blue
+                    .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
 
-                f.render_stateful_widget(table, content_chunks[1], &mut app.content_table_state);
+                f.render_stateful_widget(method_list, method_chunks[0], &mut app.method_list_state);
 
-                // Render Scrollbar for Methods
-                app.content_scroll_state = app
-                    .content_scroll_state
+                // Scrollbar for Method List
+                app.method_list_scroll_state = app
+                    .method_list_scroll_state
                     .content_length(filtered_methods.len());
-                if let Some(i) = app.content_table_state.selected() {
-                    app.content_scroll_state = app.content_scroll_state.position(i);
+                if let Some(i) = app.method_list_state.selected() {
+                    app.method_list_scroll_state = app.method_list_scroll_state.position(i);
                 }
                 f.render_stateful_widget(
                     Scrollbar::default()
                         .orientation(ScrollbarOrientation::VerticalRight)
                         .begin_symbol(Some("↑"))
                         .end_symbol(Some("↓")),
-                    content_chunks[1],
-                    &mut app.content_scroll_state,
+                    method_chunks[0],
+                    &mut app.method_list_scroll_state,
                 );
+
+                // --- Right Panel: Details (Signature + Docs) ---
+                let details_border_style = if app.focus == Focus::Details {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+
+                let details_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(details_border_style)
+                    .title("Details");
+
+                let inner_details_area = details_block.inner(method_chunks[1]);
+                f.render_widget(details_block, method_chunks[1]);
+
+                if let Some(selected_idx) = app.method_list_state.selected() {
+                    if let Some(method) = filtered_methods.get(selected_idx) {
+                        // Render content inside details panel
+                        // We will render to a buffer or just render widgets vertically
+                        let details_layout = Layout::default()
+                            .direction(Direction::Vertical)
+                            .constraints([Constraint::Min(0)].as_ref())
+                            .split(inner_details_area);
+
+                        let mut lines = Vec::new();
+
+                        // 1. Signature
+                        lines.push(Line::from(vec![
+                            Span::styled("ƒ ", Style::default().fg(Color::Magenta)),
+                            Span::styled(
+                                &method.name,
+                                Style::default()
+                                    .fg(Color::White)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(" ("),
+                        ]));
+
+                        for param in &method.params {
+                            let mut param_spans = Vec::new();
+                            param_spans.push(Span::raw("    "));
+                            if param.flags.contains(&"in".to_string()) {
+                                param_spans
+                                    .push(Span::styled("↓ ", Style::default().fg(Color::Green)));
+                            }
+                            if param.flags.contains(&"out".to_string()) {
+                                param_spans
+                                    .push(Span::styled("↑ ", Style::default().fg(Color::Red)));
+                            }
+                            if param.flags.contains(&"defaultvalue".to_string()) {
+                                param_spans
+                                    .push(Span::styled("* ", Style::default().fg(Color::Blue)));
+                            }
+                            if param.flags.contains(&"optional".to_string()) {
+                                param_spans
+                                    .push(Span::styled("? ", Style::default().fg(Color::Yellow)));
+                            }
+                            param_spans.push(Span::styled(
+                                format!("{} ", param.type_name),
+                                Style::default().fg(Color::White),
+                            ));
+                            param_spans.push(Span::raw(&param.name));
+                            param_spans.push(Span::raw(","));
+                            lines.push(Line::from(param_spans));
+                        }
+
+                        lines.push(Line::from(vec![
+                            Span::raw("  ) -> "),
+                            Span::styled(&method.ret_type, Style::default().fg(Color::Green)),
+                        ]));
+                        lines.push(Line::from("")); // Spacer
+
+                        // Create a Paragraph with the lines
+                        // We need to handle scrolling for the details panel
+                        let total_lines = lines.len();
+                        let paragraph = Paragraph::new(lines)
+                            .wrap(Wrap { trim: false })
+                            .scroll((app.details_scroll_offset, 0));
+
+                        f.render_widget(paragraph, details_layout[0]);
+
+                        // Scrollbar for Details
+                        app.details_scroll_state =
+                            app.details_scroll_state.content_length(total_lines);
+                        app.details_scroll_state = app
+                            .details_scroll_state
+                            .position(app.details_scroll_offset as usize);
+
+                        f.render_stateful_widget(
+                            Scrollbar::default()
+                                .orientation(ScrollbarOrientation::VerticalRight)
+                                .begin_symbol(Some("↑"))
+                                .end_symbol(Some("↓")),
+                            details_layout[0],
+                            &mut app.details_scroll_state,
+                        );
+                    }
+                }
             } else if !app.current_enums.is_empty() {
+                // 2-Panel Layout for Enums (Existing logic, just ensured it fits)
+                let member_query = app.member_search_query.to_lowercase();
                 let header_cells = ["Name", "Value"]
                     .iter()
-                    .map(|h| Cell::from(*h).style(Style::default().fg(Color::White))); // White text for header
+                    .map(|h| Cell::from(*h).style(Style::default().fg(Color::White)));
                 let header = Row::new(header_cells)
-                    .style(Style::default().bg(Color::Blue)) // Unified Blue for header
+                    .style(Style::default().bg(Color::Blue))
                     .height(1);
 
                 let filtered_enums: Vec<&EnumItemInfo> = app
@@ -738,6 +887,13 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                     ])
                 });
 
+                let content_border_style = if app.focus == Focus::MethodList {
+                    // Enums share MethodList focus for middle panel
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+
                 let table = Table::new(
                     rows,
                     [Constraint::Percentage(70), Constraint::Percentage(30)],
@@ -749,9 +905,9 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                         .border_style(content_border_style)
                         .title("Enum Values"),
                 )
-                .row_highlight_style(Style::default().bg(Color::Blue)); // Unified Blue
+                .row_highlight_style(Style::default().bg(Color::Blue));
 
-                f.render_stateful_widget(table, content_chunks[1], &mut app.content_table_state);
+                f.render_stateful_widget(table, right_area, &mut app.content_table_state);
 
                 // Render Scrollbar for Enums
                 app.content_scroll_state = app
@@ -765,7 +921,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                         .orientation(ScrollbarOrientation::VerticalRight)
                         .begin_symbol(Some("↑"))
                         .end_symbol(Some("↓")),
-                    content_chunks[1],
+                    right_area,
                     &mut app.content_scroll_state,
                 );
             } else {
@@ -774,16 +930,15 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .border_style(content_border_style)
                             .title("IDL Preview (No structured data)"),
                     )
                     .wrap(Wrap { trim: false });
-                f.render_widget(idl_paragraph, content_chunks[1]);
+                f.render_widget(idl_paragraph, right_area);
             }
         }
     }
 
-    // Global Search Popup
+    // Global Search Popup (Keep this)
     if app.show_global_search {
         let area = centered_rect(60, 50, f.area());
         f.render_widget(Clear, area); // Clear background
@@ -801,38 +956,33 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             .constraints([Constraint::Length(3), Constraint::Min(0)].as_ref())
             .split(inner_area);
 
-        let search_input = Paragraph::new(app.global_search_query.as_str())
+        let search_paragraph = Paragraph::new(app.global_search_query.as_str())
             .block(Block::default().borders(Borders::ALL).title("Query"))
-            .style(Style::default().fg(Color::White));
-        f.render_widget(search_input, chunks[0]);
+            .style(Style::default().fg(Color::Cyan));
+        f.render_widget(search_paragraph, chunks[0]);
 
         let items: Vec<ListItem> = app
             .global_search_results
             .iter()
             .map(|&idx| {
-                let item = &app.all_search_items[idx];
-                let content = Line::from(vec![
-                    Span::styled(
-                        format!("{:<10}", item.kind),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                    Span::styled(
-                        format!("{:<20}", item.type_name),
-                        Style::default().fg(Color::Cyan),
-                    ),
-                    Span::styled(&item.member_name, Style::default().fg(Color::White)), // Explicit white for legibility
-                ]);
-                ListItem::new(content)
+                if let Some(item) = app.all_search_items.get(idx) {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!("{:<10}", item.kind),
+                            Style::default().fg(Color::Yellow),
+                        ),
+                        Span::raw(format!("{}::", item.type_name)),
+                        Span::styled(&item.member_name, Style::default().fg(Color::Cyan)),
+                    ]))
+                } else {
+                    ListItem::new("Invalid Item")
+                }
             })
             .collect();
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title("Results"))
-            .highlight_style(
-                Style::default()
-                    .bg(Color::Blue) // Darker highlight (Blue)
-                    .add_modifier(Modifier::BOLD),
-            );
+            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
 
         f.render_stateful_widget(list, chunks[1], &mut app.global_search_state);
 

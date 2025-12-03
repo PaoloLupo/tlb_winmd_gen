@@ -2,12 +2,15 @@ use super::error::Error;
 use windows::{
     Win32::System::{
         Com::{
-            CoInitialize, FUNCDESC, IMPLTYPEFLAGS, INVOKE_PROPERTYGET, INVOKE_PROPERTYPUT,
-            INVOKE_PROPERTYPUTREF, INVOKEKIND, ITypeInfo, ITypeInfo2, ITypeLib, ITypeLib2,
-            TKIND_ALIAS, TKIND_COCLASS, TKIND_DISPATCH, TKIND_ENUM, TKIND_INTERFACE, TKIND_MODULE,
-            TKIND_RECORD, TKIND_UNION, TYPEATTR, TYPEDESC, VARDESC,
+            CoInitialize, FUNCDESC, IDispatch, IMPLTYPEFLAGS, INVOKE_PROPERTYGET,
+            INVOKE_PROPERTYPUT, INVOKE_PROPERTYPUTREF, INVOKEKIND, ITypeInfo, ITypeInfo2, ITypeLib,
+            ITypeLib2, TKIND_ALIAS, TKIND_COCLASS, TKIND_DISPATCH, TKIND_ENUM, TKIND_INTERFACE,
+            TKIND_MODULE, TKIND_RECORD, TKIND_UNION, TLIBATTR, TYPEATTR, TYPEDESC, VARDESC,
         },
-        Ole::LoadTypeLib,
+        Ole::{
+            LoadTypeLib, TYPEFLAG_FDISPATCHABLE, TYPEFLAG_FDUAL, TYPEFLAG_FHIDDEN,
+            TYPEFLAG_FNONEXTENSIBLE, TYPEFLAG_FOLEAUTOMATION, TYPEFLAG_FRESTRICTED,
+        },
         Variant::{
             VARIANT, VT_BOOL, VT_BSTR, VT_CY, VT_DATE, VT_DECIMAL, VT_DISPATCH, VT_EMPTY, VT_ERROR,
             VT_HRESULT, VT_I1, VT_I2, VT_I4, VT_I8, VT_INT, VT_LPSTR, VT_LPWSTR, VT_NULL, VT_PTR,
@@ -17,7 +20,7 @@ use windows::{
     },
     core::{Interface, PCWSTR},
 };
-use windows_core::{BSTR, HSTRING};
+use windows_core::{BSTR, HSTRING, IUnknown};
 
 pub struct TypeLibInfo {
     tlib: Option<ITypeLib>,
@@ -41,7 +44,7 @@ impl TypeLibInfo {
         Ok(())
     }
 
-    fn get_lib_attr(&self) -> Result<*mut windows::Win32::System::Com::TLIBATTR, Error> {
+    fn get_lib_attr(&self) -> Result<*mut TLIBATTR, Error> {
         if let Some(tlib) = &self.tlib {
             unsafe { Ok(tlib.GetLibAttr()?) }
         } else {
@@ -294,7 +297,11 @@ pub fn get_library_name(tlb_path: &std::path::Path) -> Result<String, Error> {
     Ok(name.to_string())
 }
 
-pub fn build_tlb<W>(tlb_path: &std::path::Path, mut out: W) -> Result<(), Error>
+pub fn build_tlb<W>(
+    tlb_path: &std::path::Path,
+    mut out: W,
+    import_stdole: bool,
+) -> Result<(), Error>
 where
     W: std::io::Write,
 {
@@ -305,29 +312,41 @@ where
     let (name, doc_string) = type_lib_info.get_documentation(-1)?;
 
     writeln!(out, "// Decompilated from {}", tlb_path.display())?;
-    writeln!(out, "[")?;
-    writeln!(out, "  uuid({:?}),", lib_attr.guid)?;
-    writeln!(
-        out,
-        "  version({}.{}),",
+
+    let mut lib_attributes = Vec::new();
+    lib_attributes.push(format!("uuid({:?})", lib_attr.guid));
+    lib_attributes.push(format!(
+        "version({}.{})",
         lib_attr.wMajorVerNum, lib_attr.wMinorVerNum
-    )?;
-    writeln!(out, "  helpstring(\"{}\"),", doc_string)?;
+    ));
+    lib_attributes.push(format!("helpstring(\"{}\")", doc_string));
 
     if let Some(tlib) = &type_lib_info.tlib {
         if let Ok(tlib2) = tlib.cast::<ITypeLib2>() {
             unsafe {
-                print_lib_custom_data(&tlib2, &mut out)?;
+                let custom_attrs = get_lib_custom_data(&tlib2)?;
+                lib_attributes.extend(custom_attrs);
             }
         }
     }
 
+    writeln!(out, "[")?;
+    for (i, attr) in lib_attributes.iter().enumerate() {
+        let suffix = if i == lib_attributes.len() - 1 {
+            ""
+        } else {
+            ","
+        };
+        writeln!(out, "  {}{}", attr, suffix)?;
+    }
     writeln!(out, "]")?;
     writeln!(out, "library {}", name)?;
     writeln!(out, "{{")?;
 
     // Standard imports often found in IDLs
-    // writeln!(out, "    importlib(\"stdole2.tlb\");")?;
+    if import_stdole {
+        writeln!(out, "    importlib(\"stdole2.tlb\");")?;
+    }
     writeln!(out, "")?;
 
     let count = type_lib_info.get_type_info_count();
@@ -338,7 +357,6 @@ where
             unsafe {
                 let type_attr: *mut TYPEATTR = type_info.GetTypeAttr()?;
                 let type_kind = (*type_attr).typekind;
-                let type_flags = (*type_attr).wTypeFlags;
                 let (name, _) = get_type_documentation(&type_info, -1);
 
                 match type_kind {
@@ -346,12 +364,7 @@ where
                         writeln!(out, "    interface {};", name)?;
                     }
                     TKIND_DISPATCH => {
-                        let is_dual = (type_flags & 0x40) != 0; // TYPEFLAG_FDUAL
-                        if is_dual {
-                            writeln!(out, "    interface {};", name)?;
-                        } else {
-                            writeln!(out, "    dispinterface {};", name)?;
-                        }
+                        writeln!(out, "    interface {};", name)?;
                     }
                     TKIND_COCLASS => {
                         writeln!(out, "    coclass {};", name)?;
@@ -395,7 +408,7 @@ where
     Ok(())
 }
 
-fn print_type_info<W>(type_info: &ITypeInfo, out: &mut W) -> Result<(), Error>
+fn print_interface_header<W>(type_info: &ITypeInfo, out: &mut W) -> Result<(), Error>
 where
     W: std::io::Write,
 {
@@ -403,42 +416,104 @@ where
         let type_attr: *mut TYPEATTR = type_info.GetTypeAttr()?;
         let type_kind = (*type_attr).typekind;
         let guid = (*type_attr).guid;
-        let (name, doc_string) = get_type_documentation(type_info, -1);
+        let (_, doc_string) = get_type_documentation(type_info, -1);
         let type_flags = (*type_attr).wTypeFlags;
 
-        writeln!(out, "    [")?;
-        writeln!(out, "      odl,")?;
-        writeln!(out, "      uuid({:?}),", guid)?;
-        if type_kind == TKIND_INTERFACE || type_kind == TKIND_DISPATCH || type_kind == TKIND_COCLASS
+        if type_kind == TKIND_INTERFACE
+            || type_kind == TKIND_DISPATCH
+            || type_kind == TKIND_COCLASS
+            || type_kind == TKIND_ENUM
         {
-            writeln!(
-                out,
-                "      version({}.{}),",
-                (*type_attr).wMajorVerNum,
-                (*type_attr).wMinorVerNum
-            )?;
-        }
-        if !doc_string.is_empty() {
-            writeln!(out, "      helpstring(\"{}\"),", doc_string)?;
+            let mut attributes = Vec::new();
+            attributes.push(format!("uuid({:?})", guid));
+
+            if !doc_string.is_empty() {
+                attributes.push(format!("helpstring(\"{}\")", doc_string));
+            }
+
+            let flags_map = [
+                (TYPEFLAG_FHIDDEN.0 as u16, "hidden"),
+                (TYPEFLAG_FDUAL.0 as u16, "dual"),
+                (TYPEFLAG_FRESTRICTED.0 as u16, "restricted"),
+                (TYPEFLAG_FNONEXTENSIBLE.0 as u16, "nonextensible"),
+                (TYPEFLAG_FOLEAUTOMATION.0 as u16, "oleautomation"),
+            ];
+
+            for (flag, attr) in flags_map {
+                if (type_flags & flag) != 0 {
+                    attributes.push(attr.to_string());
+                }
+            }
+
+            if type_flags & (TYPEFLAG_FDISPATCHABLE.0 as u16 | TYPEFLAG_FDUAL.0 as u16) != 0 {
+                attributes.push("oleautomation".to_string());
+            }
+
+            // Custom attributes
+            if let Ok(type_info2) = type_info.cast::<ITypeInfo2>() {
+                let custom_attrs = get_custom_data(&type_info2)?;
+                attributes.extend(custom_attrs);
+            }
+
+            writeln!(out, "    [")?;
+            for (i, attr) in attributes.iter().enumerate() {
+                let suffix = if i == attributes.len() - 1 { "" } else { "," };
+                writeln!(out, "      {}{}", attr, suffix)?;
+            }
+            writeln!(out, "    ]")?;
         }
 
-        // Check attributes
-        if (type_flags & 0x40) != 0 {
-            writeln!(out, "      dual,")?;
-        } // TYPEFLAG_FDUAL
-        if (type_flags & 0x20) != 0 {
-            writeln!(out, "      oleautomation,")?;
-        } // TYPEFLAG_FOLEAUTOMATION
-        if (type_flags & 0x80) != 0 {
-            writeln!(out, "      nonextensible,")?;
-        } // TYPEFLAG_FNONEXTENSIBLE
+        Ok(())
+    }
+}
 
-        // Custom attributes
-        if let Ok(type_info2) = type_info.cast::<ITypeInfo2>() {
-            print_custom_data(&type_info2, out)?;
+fn print_type_info<W>(type_info: &ITypeInfo, out: &mut W) -> Result<(), Error>
+where
+    W: std::io::Write,
+{
+    unsafe {
+        let type_attr: *mut TYPEATTR = type_info.GetTypeAttr()?;
+
+        let guid = (*type_attr).guid;
+
+        if guid == IUnknown::IID || guid == IDispatch::IID {
+            type_info.ReleaseTypeAttr(type_attr);
+            return Ok(());
         }
 
-        writeln!(out, "    ]")?;
+        let type_kind = (*type_attr).typekind;
+        let type_flags = (*type_attr).wTypeFlags;
+
+        // Special handling for pure dispinterfaces: extract the inherited interface
+        if type_kind == TKIND_DISPATCH && (type_flags & TYPEFLAG_FDUAL.0 as u16) == 0 {
+            if (*type_attr).cImplTypes > 0 {
+                if let Ok(href) = type_info.GetRefTypeOfImplType(0) {
+                    if let Ok(ref_type_info) = type_info.GetRefTypeInfo(href) {
+                        if let Ok(ref_attr) = ref_type_info.GetTypeAttr() {
+                            let ref_kind = (*ref_attr).typekind;
+                            let ref_flags = (*ref_attr).wTypeFlags;
+                            let is_dual = (ref_flags & TYPEFLAG_FDUAL.0 as u16) != 0;
+                            let ref_guid = (*ref_attr).guid;
+                            ref_type_info.ReleaseTypeAttr(ref_attr);
+
+                            if (ref_kind == TKIND_INTERFACE
+                                || (ref_kind == TKIND_DISPATCH && is_dual))
+                                && ref_guid != IUnknown::IID
+                                && ref_guid != IDispatch::IID
+                            {
+                                type_info.ReleaseTypeAttr(type_attr);
+                                return print_type_info(&ref_type_info, out);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let guid = (*type_attr).guid;
+        let (name, doc_string) = get_type_documentation(type_info, -1);
+
+        print_interface_header(type_info, out)?;
 
         match type_kind {
             TKIND_INTERFACE => {
@@ -469,54 +544,67 @@ where
                 writeln!(out, "    }};")?;
             }
             TKIND_DISPATCH => {
-                let is_dual = (type_flags & 0x40) != 0;
+                let is_dual = (type_flags & TYPEFLAG_FDUAL.0 as u16) != 0;
                 if is_dual {
-                    // Dual interface, treat as standard interface
-                    // Find base interface
-                    let mut base_name = String::new();
-                    if (*type_attr).cImplTypes > 0 {
-                        if let Ok(href) = type_info.GetRefTypeOfImplType(0) {
-                            if let Ok(base_info) = type_info.GetRefTypeInfo(href) {
-                                base_name = get_name(&base_info);
-                            }
+                    // Dual interface: get the partner interface (TKIND_INTERFACE)
+                    // The partner interface is usually at impl type -1 (0xFFFFFFFF)
+                    let mut partner_type_info = None;
+                    if let Ok(href) = type_info.GetRefTypeOfImplType(u32::MAX) {
+                        if let Ok(ref_type_info) = type_info.GetRefTypeInfo(href) {
+                            partner_type_info = Some(ref_type_info);
                         }
                     }
 
-                    if !base_name.is_empty() {
-                        writeln!(out, "    interface {} : {} {{", name, base_name)?;
+                    if let Some(partner_info) = partner_type_info {
+                        // Use the partner interface for everything
+                        let partner_attr = partner_info.GetTypeAttr()?;
+
+                        // Find base interface of the partner
+                        let mut base_name = String::new();
+
+                        if (*partner_attr).cImplTypes > 0 {
+                            if let Ok(href) = partner_info.GetRefTypeOfImplType(0) {
+                                if let Ok(base_info) = partner_info.GetRefTypeInfo(href) {
+                                    base_name = get_name(&base_info);
+                                }
+                            }
+                        }
+
+                        if !base_name.is_empty() {
+                            writeln!(out, "    interface {} : {} {{", name, base_name)?;
+                        } else {
+                            writeln!(out, "    interface {} {{", name)?;
+                        }
+
+                        // Print methods
+                        for i in 0..(*partner_attr).cFuncs {
+                            if let Ok(func_desc) = partner_info.GetFuncDesc(i as u32) {
+                                print_function(&partner_info, &*func_desc, out)?;
+                                partner_info.ReleaseFuncDesc(func_desc);
+                            }
+                        }
+
+                        partner_info.ReleaseTypeAttr(partner_attr);
+                        writeln!(out, "    }};")?;
                     } else {
-                        writeln!(out, "    interface {} {{", name)?;
-                    }
-
-                    // Print properties and methods
-                    for i in 0..(*type_attr).cFuncs {
-                        if let Ok(func_desc) = type_info.GetFuncDesc(i as u32) {
-                            print_function(type_info, &*func_desc, out)?;
-                            type_info.ReleaseFuncDesc(func_desc);
-                        }
-                    }
-                    writeln!(out, "    }};")?;
-                } else {
-                    // Pure dispinterface
-                    writeln!(out, "    dispinterface {} {{", name)?;
-
-                    if (*type_attr).cVars > 0 {
-                        writeln!(out, "    properties:")?;
-                        for i in 0..(*type_attr).cVars {
-                            if let Ok(var_desc) = type_info.GetVarDesc(i as u32) {
-                                print_disp_property(type_info, &*var_desc, out)?;
-                                type_info.ReleaseVarDesc(var_desc);
-                            }
-                        }
-                    }
-
-                    if (*type_attr).cFuncs > 0 {
-                        writeln!(out, "    methods:")?;
-                        for i in 0..(*type_attr).cFuncs {
+                        // Fallback if partner not found (shouldn't happen for valid duals)
+                        writeln!(out, "    interface {} : IDispatch {{", name)?;
+                        for i in 7..(*type_attr).cFuncs {
+                            // Skip IDispatch methods
                             if let Ok(func_desc) = type_info.GetFuncDesc(i as u32) {
                                 print_function(type_info, &*func_desc, out)?;
                                 type_info.ReleaseFuncDesc(func_desc);
                             }
+                        }
+                        writeln!(out, "    }};")?;
+                    }
+                } else {
+                    // Non-dual dispinterface treated as interface : IDispatch
+                    writeln!(out, "    interface {} : IDispatch {{", name)?;
+                    for i in 0..(*type_attr).cFuncs {
+                        if let Ok(func_desc) = type_info.GetFuncDesc(i as u32) {
+                            print_function(type_info, &*func_desc, out)?;
+                            type_info.ReleaseFuncDesc(func_desc);
                         }
                     }
                     writeln!(out, "    }};")?;
@@ -565,12 +653,20 @@ where
                 writeln!(out, "    }};")?;
             }
             TKIND_ALIAS => {
-                if let Ok(_) = type_info
-                    .GetRefTypeOfImplType(0)
-                    .and_then(|href| type_info.GetRefTypeInfo(href))
-                {
-                    writeln!(out, "    typedef {};", name)?;
+                let alias_type_name = type_desc_to_string(type_info, &(*type_attr).tdescAlias);
+                let mut attributes = Vec::new();
+
+                if (type_flags & TYPEFLAG_FHIDDEN.0 as u16) == 0 {
+                    attributes.push("public");
                 }
+
+                let attr_str = if !attributes.is_empty() {
+                    format!("[{}] ", attributes.join(", "))
+                } else {
+                    String::new()
+                };
+
+                writeln!(out, "    typedef {}{} {};", attr_str, alias_type_name, name)?;
             }
             TKIND_RECORD => {
                 writeln!(out, "    typedef struct tag{} {{", name)?;
@@ -595,13 +691,19 @@ where
                     }
                 }
 
-                writeln!(out, "    [")?;
+                let mut attributes = Vec::new();
                 if !dll_name.is_empty() {
-                    writeln!(out, "      dllname(\"{}\"),", dll_name)?;
+                    attributes.push(format!("dllname(\"{}\")", dll_name));
                 }
-                writeln!(out, "      uuid({:?}),", guid)?;
+                attributes.push(format!("uuid({:?})", guid));
                 if !doc_string.is_empty() {
-                    writeln!(out, "      helpstring(\"{}\"),", doc_string)?;
+                    attributes.push(format!("helpstring(\"{}\")", doc_string));
+                }
+
+                writeln!(out, "    [")?;
+                for (i, attr) in attributes.iter().enumerate() {
+                    let suffix = if i == attributes.len() - 1 { "" } else { "," };
+                    writeln!(out, "      {}{}", attr, suffix)?;
                 }
                 writeln!(out, "    ]")?;
                 writeln!(out, "    module {} {{", name)?;
@@ -671,10 +773,8 @@ unsafe fn get_dll_entry(
     Ok(dll_name.to_string())
 }
 
-unsafe fn print_lib_custom_data<W>(type_lib2: &ITypeLib2, out: &mut W) -> Result<(), Error>
-where
-    W: std::io::Write,
-{
+unsafe fn get_lib_custom_data(type_lib2: &ITypeLib2) -> Result<Vec<String>, Error> {
+    let mut attrs = Vec::new();
     let cust_data = unsafe { type_lib2.GetAllCustData()? };
 
     for i in 0..cust_data.cCustData {
@@ -686,16 +786,14 @@ where
         if vt == VT_BSTR {
             let bstr_val = unsafe { &val.Anonymous.Anonymous.Anonymous.bstrVal };
             let s = bstr_val.to_string();
-            writeln!(out, "  custom({:?}, \"{}\"),", guid, s)?;
+            attrs.push(format!("custom({:?}, \"{}\")", guid, s));
         }
     }
-    Ok(())
+    Ok(attrs)
 }
 
-unsafe fn print_custom_data<W>(type_info2: &ITypeInfo2, out: &mut W) -> Result<(), Error>
-where
-    W: std::io::Write,
-{
+unsafe fn get_custom_data(type_info2: &ITypeInfo2) -> Result<Vec<String>, Error> {
+    let mut attrs = Vec::new();
     let cust_data = unsafe { type_info2.GetAllCustData()? };
 
     for i in 0..cust_data.cCustData {
@@ -708,10 +806,10 @@ where
             let bstr_val = unsafe { &val.Anonymous.Anonymous.Anonymous.bstrVal };
             // bstr_val is ManuallyDrop<BSTR>
             let s = bstr_val.to_string();
-            writeln!(out, "      custom({:?}, \"{}\"),", guid, s)?;
+            attrs.push(format!("custom({:?}, \"{}\")", guid, s));
         }
     }
-    Ok(())
+    Ok(attrs)
 }
 
 unsafe fn print_function<W>(
@@ -730,20 +828,28 @@ where
         return Ok(());
     }
 
-    let (name, _) = unsafe { get_type_documentation(type_info, memid) };
+    let (name, doc_string) = unsafe { get_type_documentation(type_info, memid) };
 
     let invoke_kind = func_desc.invkind;
-    let prop_prefix = match invoke_kind {
-        INVOKE_PROPERTYGET => "[propget] ",
-        INVOKE_PROPERTYPUT => "[propput] ",
-        INVOKE_PROPERTYPUTREF => "[propputref] ",
+    let prop_attr = match invoke_kind {
+        INVOKE_PROPERTYGET => "propget",
+        INVOKE_PROPERTYPUT => "propput",
+        INVOKE_PROPERTYPUTREF => "propputref",
         _ => "",
     };
 
     let ret_type = unsafe { type_desc_to_string(type_info, &func_desc.elemdescFunc.tdesc) };
 
-    writeln!(out, "        [id(0x{:08x})]", memid)?;
-    write!(out, "        {}HRESULT {} (", prop_prefix, name)?;
+    write!(out, "        [id(0x{:08x})", memid)?;
+    if !prop_attr.is_empty() {
+        write!(out, ", {}", prop_attr)?;
+    }
+    if !doc_string.is_empty() {
+        write!(out, ", helpstring(\"{}\")", doc_string)?;
+    }
+    write!(out, "]\n")?;
+
+    write!(out, "        {}HRESULT {} (", "", name)?;
 
     // Get parameter names
     let mut names: Vec<BSTR> = vec![BSTR::new(); (func_desc.cParams + 1) as usize];
@@ -753,6 +859,8 @@ where
             .GetNames(memid, names.as_mut_slice(), &mut c_names)
             .ok();
     }
+
+    let mut has_retval = false;
 
     for i in 0..func_desc.cParams {
         let elem_desc = unsafe { *func_desc.lprgelemdescParam.offset(i as isize) };
@@ -779,6 +887,7 @@ where
         } // PARAMFLAG_FLCID
         if (param_flags.0 & 8) != 0 {
             attrs.push("retval".to_string());
+            has_retval = true;
         } // PARAMFLAG_FRETVAL
         if (param_flags.0 & 16) != 0 {
             attrs.push("optional".to_string());
@@ -800,6 +909,11 @@ where
             }
         } // PARAMFLAG_FHASDEFAULT
 
+        // Ensure [in] is present if optional is set and no direction is specified
+        if attrs.iter().any(|a| a == "optional") && !attrs.iter().any(|a| a == "in" || a == "out") {
+            attrs.insert(0, "in".to_string());
+        }
+
         let attr_str = if !attrs.is_empty() {
             format!("[{}] ", attrs.join(", "))
         } else {
@@ -812,7 +926,7 @@ where
         write!(out, "{}{} {}", attr_str, param_type, param_name)?;
     }
 
-    if invoke_kind == INVOKE_PROPERTYGET || ret_type != "void" {
+    if (invoke_kind == INVOKE_PROPERTYGET || ret_type != "void") && !has_retval {
         if func_desc.cParams > 0 {
             write!(out, ", ")?;
         }
@@ -829,22 +943,6 @@ where
     }
 
     writeln!(out, ");")?;
-    Ok(())
-}
-
-unsafe fn print_disp_property<W>(
-    type_info: &ITypeInfo,
-    var_desc: &VARDESC,
-    out: &mut W,
-) -> Result<(), Error>
-where
-    W: std::io::Write,
-{
-    let memid = var_desc.memid;
-    let (name, _) = unsafe { get_type_documentation(type_info, memid) };
-    let type_name = unsafe { type_desc_to_string(type_info, &var_desc.elemdescVar.tdesc) };
-
-    writeln!(out, "        [id(0x{:08x})] {} {};", memid, type_name, name)?;
     Ok(())
 }
 

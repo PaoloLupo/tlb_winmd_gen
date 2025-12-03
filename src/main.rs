@@ -25,6 +25,10 @@ struct Args {
     /// Run in TUI mode to inspect the TypeLib
     #[arg(long)]
     ui: bool,
+
+    /// Import stdole2.tlb in the generated IDL
+    #[arg(long)]
+    import_stdole: bool,
 }
 
 fn main() -> Result<(), error::Error> {
@@ -56,7 +60,7 @@ fn main() -> Result<(), error::Error> {
     {
         let file = File::create(&idl_path)?;
         let mut writer = BufWriter::new(file);
-        idlgen::build_tlb(tlb_path, &mut writer)?;
+        idlgen::build_tlb(tlb_path, &mut writer, args.import_stdole)?;
     }
 
     let proj_path = out_dir.join("generate.proj");
