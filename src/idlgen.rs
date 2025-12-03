@@ -167,6 +167,7 @@ pub struct ParamInfo {
     pub name: String,
     pub type_name: String,
     pub flags: Vec<String>,
+    pub default_value: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -248,14 +249,28 @@ unsafe fn get_function_info(
         if (param_flags.0 & 16) != 0 {
             flags.push("optional".to_string());
         }
+        let mut default_value = None;
         if (param_flags.0 & 32) != 0 {
             flags.push("defaultvalue".to_string());
+            let val = unsafe {
+                let param_desc_ex = elem_desc.Anonymous.paramdesc.pparamdescex;
+                if !param_desc_ex.is_null() {
+                    let variant = &(*param_desc_ex).varDefaultValue;
+                    variant_to_string(variant)
+                } else {
+                    String::new()
+                }
+            };
+            if !val.is_empty() {
+                default_value = Some(val);
+            }
         }
 
         params.push(ParamInfo {
             name: param_name,
             type_name: param_type,
             flags,
+            default_value,
         });
     }
 
