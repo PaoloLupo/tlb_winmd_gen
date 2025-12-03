@@ -308,23 +308,33 @@ where
     let (name, doc_string) = type_lib_info.get_documentation(-1)?;
 
     writeln!(out, "// Decompilated from {}", tlb_path.display())?;
-    writeln!(out, "[")?;
-    writeln!(out, "  uuid({:?}),", lib_attr.guid)?;
-    writeln!(
-        out,
-        "  version({}.{}),",
+
+    let mut lib_attributes = Vec::new();
+    lib_attributes.push(format!("uuid({:?})", lib_attr.guid));
+    lib_attributes.push(format!(
+        "version({}.{})",
         lib_attr.wMajorVerNum, lib_attr.wMinorVerNum
-    )?;
-    writeln!(out, "  helpstring(\"{}\"),", doc_string)?;
+    ));
+    lib_attributes.push(format!("helpstring(\"{}\")", doc_string));
 
     if let Some(tlib) = &type_lib_info.tlib {
         if let Ok(tlib2) = tlib.cast::<ITypeLib2>() {
             unsafe {
-                print_lib_custom_data(&tlib2, &mut out)?;
+                let custom_attrs = get_lib_custom_data(&tlib2)?;
+                lib_attributes.extend(custom_attrs);
             }
         }
     }
 
+    writeln!(out, "[")?;
+    for (i, attr) in lib_attributes.iter().enumerate() {
+        let suffix = if i == lib_attributes.len() - 1 {
+            ""
+        } else {
+            ","
+        };
+        writeln!(out, "  {}{}", attr, suffix)?;
+    }
     writeln!(out, "]")?;
     writeln!(out, "library {}", name)?;
     writeln!(out, "{{")?;
@@ -414,21 +424,20 @@ where
             || type_kind == TKIND_COCLASS
             || type_kind == TKIND_ENUM
         {
-            writeln!(out, "    [")?;
-            writeln!(out, "      uuid({:?}),", guid)?;
+            let mut attributes = Vec::new();
+            attributes.push(format!("uuid({:?})", guid));
+
             if (*type_attr).wMajorVerNum != 0 || (*type_attr).wMinorVerNum > 0 {
-                writeln!(
-                    out,
-                    "      version({}.{}),",
+                attributes.push(format!(
+                    "version({}.{})",
                     (*type_attr).wMajorVerNum,
                     (*type_attr).wMinorVerNum
-                )?;
+                ));
             }
 
             if !doc_string.is_empty() {
-                writeln!(out, "      helpstring(\"{}\"),", doc_string)?;
+                attributes.push(format!("helpstring(\"{}\")", doc_string));
             }
-            let mut attributes: Vec<&str> = Vec::new();
 
             let flags_map = [
                 (TYPEFLAG_FHIDDEN.0 as u16, "hidden"),
@@ -440,26 +449,26 @@ where
 
             for (flag, attr) in flags_map {
                 if (type_flags & flag) != 0 {
-                    attributes.push(attr);
+                    attributes.push(attr.to_string());
                 }
             }
 
             if type_flags & (TYPEFLAG_FDISPATCHABLE.0 as u16 | TYPEFLAG_FDUAL.0 as u16) != 0 {
-                attributes.push("oleautomation");
-            }
-
-            if let Some((last, rest)) = attributes.split_last() {
-                for attr in rest {
-                    writeln!(out, "      {},", attr)?;
-                }
-                write!(out, "      {}", last)?;
+                attributes.push("oleautomation".to_string());
             }
 
             // Custom attributes
             if let Ok(type_info2) = type_info.cast::<ITypeInfo2>() {
-                print_custom_data(&type_info2, out)?;
+                let custom_attrs = get_custom_data(&type_info2)?;
+                attributes.extend(custom_attrs);
             }
-            writeln!(out, "\n    ]")?;
+
+            writeln!(out, "    [")?;
+            for (i, attr) in attributes.iter().enumerate() {
+                let suffix = if i == attributes.len() - 1 { "" } else { "," };
+                writeln!(out, "      {}{}", attr, suffix)?;
+            }
+            writeln!(out, "    ]")?;
         }
 
         Ok(())
@@ -508,7 +517,7 @@ where
                 writeln!(out, "    }};")?;
             }
             TKIND_DISPATCH => {
-                let is_dual = (type_flags & 0x40) != 0;
+                let is_dual = (type_flags & TYPEFLAG_FDUAL.0 as u16) != 0;
                 if is_dual {
                     // Dual interface, treat as standard interface
                     // Find base interface
@@ -536,29 +545,29 @@ where
                     }
                     writeln!(out, "    }};")?;
                 } else {
-                    // Pure dispinterface
-                    writeln!(out, "    dispinterface {} {{", name)?;
+                    // // Pure dispinterface
+                    // writeln!(out, "    dispinterface {} {{", name)?;
 
-                    if (*type_attr).cVars > 0 {
-                        writeln!(out, "    properties:")?;
-                        for i in 0..(*type_attr).cVars {
-                            if let Ok(var_desc) = type_info.GetVarDesc(i as u32) {
-                                print_disp_property(type_info, &*var_desc, out)?;
-                                type_info.ReleaseVarDesc(var_desc);
-                            }
-                        }
-                    }
+                    // if (*type_attr).cVars > 0 {
+                    //     writeln!(out, "    properties:")?;
+                    //     for i in 0..(*type_attr).cVars {
+                    //         if let Ok(var_desc) = type_info.GetVarDesc(i as u32) {
+                    //             print_disp_property(type_info, &*var_desc, out)?;
+                    //             type_info.ReleaseVarDesc(var_desc);
+                    //         }
+                    //     }
+                    // }
 
-                    if (*type_attr).cFuncs > 0 {
-                        writeln!(out, "    methods:")?;
-                        for i in 0..(*type_attr).cFuncs {
-                            if let Ok(func_desc) = type_info.GetFuncDesc(i as u32) {
-                                print_function(type_info, &*func_desc, out)?;
-                                type_info.ReleaseFuncDesc(func_desc);
-                            }
-                        }
-                    }
-                    writeln!(out, "    }};")?;
+                    // if (*type_attr).cFuncs > 0 {
+                    //     writeln!(out, "    methods:")?;
+                    //     for i in 0..(*type_attr).cFuncs {
+                    //         if let Ok(func_desc) = type_info.GetFuncDesc(i as u32) {
+                    //             print_function(type_info, &*func_desc, out)?;
+                    //             type_info.ReleaseFuncDesc(func_desc);
+                    //         }
+                    //     }
+                    // }
+                    // writeln!(out, "    }};")?;
                 }
             }
             TKIND_ENUM => {
@@ -634,13 +643,19 @@ where
                     }
                 }
 
-                writeln!(out, "    [")?;
+                let mut attributes = Vec::new();
                 if !dll_name.is_empty() {
-                    writeln!(out, "      dllname(\"{}\"),", dll_name)?;
+                    attributes.push(format!("dllname(\"{}\")", dll_name));
                 }
-                writeln!(out, "      uuid({:?}),", guid)?;
+                attributes.push(format!("uuid({:?})", guid));
                 if !doc_string.is_empty() {
-                    writeln!(out, "      helpstring(\"{}\"),", doc_string)?;
+                    attributes.push(format!("helpstring(\"{}\")", doc_string));
+                }
+
+                writeln!(out, "    [")?;
+                for (i, attr) in attributes.iter().enumerate() {
+                    let suffix = if i == attributes.len() - 1 { "" } else { "," };
+                    writeln!(out, "      {}{}", attr, suffix)?;
                 }
                 writeln!(out, "    ]")?;
                 writeln!(out, "    module {} {{", name)?;
@@ -710,10 +725,8 @@ unsafe fn get_dll_entry(
     Ok(dll_name.to_string())
 }
 
-unsafe fn print_lib_custom_data<W>(type_lib2: &ITypeLib2, out: &mut W) -> Result<(), Error>
-where
-    W: std::io::Write,
-{
+unsafe fn get_lib_custom_data(type_lib2: &ITypeLib2) -> Result<Vec<String>, Error> {
+    let mut attrs = Vec::new();
     let cust_data = unsafe { type_lib2.GetAllCustData()? };
 
     for i in 0..cust_data.cCustData {
@@ -725,16 +738,14 @@ where
         if vt == VT_BSTR {
             let bstr_val = unsafe { &val.Anonymous.Anonymous.Anonymous.bstrVal };
             let s = bstr_val.to_string();
-            writeln!(out, "  custom({:?}, \"{}\"),", guid, s)?;
+            attrs.push(format!("custom({:?}, \"{}\")", guid, s));
         }
     }
-    Ok(())
+    Ok(attrs)
 }
 
-unsafe fn print_custom_data<W>(type_info2: &ITypeInfo2, out: &mut W) -> Result<(), Error>
-where
-    W: std::io::Write,
-{
+unsafe fn get_custom_data(type_info2: &ITypeInfo2) -> Result<Vec<String>, Error> {
+    let mut attrs = Vec::new();
     let cust_data = unsafe { type_info2.GetAllCustData()? };
 
     for i in 0..cust_data.cCustData {
@@ -747,11 +758,10 @@ where
             let bstr_val = unsafe { &val.Anonymous.Anonymous.Anonymous.bstrVal };
             // bstr_val is ManuallyDrop<BSTR>
             let s = bstr_val.to_string();
-            write!(out, ",\n")?;
-            write!(out, "      custom({:?}, \"{}\")", guid, s)?;
+            attrs.push(format!("custom({:?}, \"{}\")", guid, s));
         }
     }
-    Ok(())
+    Ok(attrs)
 }
 
 unsafe fn print_function<W>(
