@@ -1023,7 +1023,10 @@ unsafe fn type_desc_to_string(type_info: &ITypeInfo, tdesc: &TYPEDESC) -> String
             let pointed_type = unsafe { type_desc_to_string(type_info, &*tdesc.Anonymous.lptdesc) };
             format!("{}*", pointed_type)
         }
-        VT_SAFEARRAY => "SAFEARRAY".to_string(),
+        VT_SAFEARRAY => {
+            let element_type = unsafe { type_desc_to_string(type_info, &*tdesc.Anonymous.lptdesc) };
+            format!("SAFEARRAY({})", element_type)
+        }
         VT_USERDEFINED => {
             if let Ok(ref_type_info) = unsafe { type_info.GetRefTypeInfo(tdesc.Anonymous.hreftype) }
             {
