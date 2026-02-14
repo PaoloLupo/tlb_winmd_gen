@@ -779,6 +779,7 @@ dependencies = [
 name = "tlb_winmd_gen"
 version = "0.1.0"
 dependencies = [
+ "bitflags 2.10.0",
  "chmlib",
  "clap",
  "crossterm 0.29.0",

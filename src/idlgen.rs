@@ -1,4 +1,5 @@
 use super::error::Error;
+use crate::flags::{ImplTypeFlags, ParamFlags, TypeFlags};
 use windows::{
     Win32::System::{
         Com::{
@@ -7,10 +8,7 @@ use windows::{
             ITypeLib2, TKIND_ALIAS, TKIND_COCLASS, TKIND_DISPATCH, TKIND_ENUM, TKIND_INTERFACE,
             TKIND_MODULE, TKIND_RECORD, TKIND_UNION, TLIBATTR, TYPEATTR, TYPEDESC, VARDESC,
         },
-        Ole::{
-            LoadTypeLib, TYPEFLAG_FDISPATCHABLE, TYPEFLAG_FDUAL, TYPEFLAG_FHIDDEN,
-            TYPEFLAG_FNONEXTENSIBLE, TYPEFLAG_FOLEAUTOMATION, TYPEFLAG_FRESTRICTED,
-        },
+        Ole::LoadTypeLib,
         Variant::{
             VARIANT, VT_BOOL, VT_BSTR, VT_CY, VT_DATE, VT_DECIMAL, VT_DISPATCH, VT_EMPTY, VT_ERROR,
             VT_HRESULT, VT_I1, VT_I2, VT_I4, VT_I8, VT_INT, VT_LPSTR, VT_LPWSTR, VT_NULL, VT_PTR,
@@ -552,21 +550,25 @@ where
             attributes.push(format!("helpstring(\"{}\")", doc_string));
         }
 
-        let flags_map = [
-            (TYPEFLAG_FHIDDEN.0 as u16, "hidden"),
-            (TYPEFLAG_FDUAL.0 as u16, "dual"),
-            (TYPEFLAG_FRESTRICTED.0 as u16, "restricted"),
-            (TYPEFLAG_FNONEXTENSIBLE.0 as u16, "nonextensible"),
-            (TYPEFLAG_FOLEAUTOMATION.0 as u16, "oleautomation"),
-        ];
+        let flags = TypeFlags::from_bits_truncate(type_flags);
 
-        for (flag, attr) in flags_map {
-            if (type_flags & flag) != 0 {
-                attributes.push(attr.to_string());
-            }
+        if flags.contains(TypeFlags::FHIDDEN) {
+            attributes.push("hidden".to_string());
+        }
+        if flags.contains(TypeFlags::FDUAL) {
+            attributes.push("dual".to_string());
+        }
+        if flags.contains(TypeFlags::FRESTRICTED) {
+            attributes.push("restricted".to_string());
+        }
+        if flags.contains(TypeFlags::FNONEXTENSIBLE) {
+            attributes.push("nonextensible".to_string());
+        }
+        if flags.contains(TypeFlags::FOLEAUTOMATION) {
+            attributes.push("oleautomation".to_string());
         }
 
-        if type_flags & (TYPEFLAG_FDISPATCHABLE.0 as u16 | TYPEFLAG_FDUAL.0 as u16) != 0 {
+        if flags.contains(TypeFlags::FDISPATCHABLE | TypeFlags::FDUAL) {
             attributes.push("oleautomation".to_string());
         }
 
@@ -605,18 +607,18 @@ where
     let type_flags = type_attr.wTypeFlags;
 
     // Special handling for pure dispinterfaces: extract the inherited interface
-    if type_kind == TKIND_DISPATCH && (type_flags & TYPEFLAG_FDUAL.0 as u16) == 0 {
+    if type_kind == TKIND_DISPATCH
+        && !TypeFlags::from_bits_truncate(type_flags).contains(TypeFlags::FDUAL)
+    {
         if type_attr.cImplTypes > 0 {
             if let Ok(href) = unsafe { type_info.GetRefTypeOfImplType(0) } {
                 if let Ok(ref_type_info) = unsafe { type_info.GetRefTypeInfo(href) } {
                     if let Ok(ref_attr) = SafeTypeAttr::new(&ref_type_info) {
                         let ref_kind = ref_attr.typekind;
                         let ref_flags = ref_attr.wTypeFlags;
-                        let is_dual = (ref_flags & TYPEFLAG_FDUAL.0 as u16) != 0;
+                        let is_dual =
+                            TypeFlags::from_bits_truncate(ref_flags).contains(TypeFlags::FDUAL);
                         let ref_guid = ref_attr.guid;
-
-                        // We must drop ref_attr before calling recursive print to avoid holding it too long?
-                        // No, RAII handles it.
 
                         if (ref_kind == TKIND_INTERFACE || (ref_kind == TKIND_DISPATCH && is_dual))
                             && ref_guid != IUnknown::IID
@@ -696,7 +698,7 @@ fn print_dispatch_body<W>(
 where
     W: std::io::Write,
 {
-    let is_dual = (type_attr.wTypeFlags & TYPEFLAG_FDUAL.0 as u16) != 0;
+    let is_dual = TypeFlags::from_bits_truncate(type_attr.wTypeFlags).contains(TypeFlags::FDUAL);
     if is_dual {
         // Dual interface: get the partner interface (TKIND_INTERFACE)
         // The partner interface is usually at impl type -1 (0xFFFFFFFF)
@@ -792,19 +794,20 @@ where
         if let Ok(href) = unsafe { type_info.GetRefTypeOfImplType(i as u32) } {
             if let Ok(ref_type_info) = unsafe { type_info.GetRefTypeInfo(href) } {
                 let ref_name = unsafe { get_name(&ref_type_info) };
-                let impl_flags = unsafe {
+                let impl_flags_raw = unsafe {
                     type_info
                         .GetImplTypeFlags(i as u32)
                         .unwrap_or(IMPLTYPEFLAGS::default())
                 };
+                let impl_flags = ImplTypeFlags::from_bits_truncate(impl_flags_raw.0 as u32);
                 // Check for [default]
-                let default_str = if (impl_flags.0 & 1) != 0 {
+                let default_str = if impl_flags.contains(ImplTypeFlags::FDEFAULT) {
                     "[default] "
                 } else {
                     ""
                 };
                 // Check for [source] (2)
-                let source_str = if (impl_flags.0 & 2) != 0 {
+                let source_str = if impl_flags.contains(ImplTypeFlags::FSOURCE) {
                     "[source] "
                 } else {
                     ""
@@ -834,7 +837,7 @@ where
     let alias_type_name = unsafe { type_desc_to_string(type_info, &type_attr.tdescAlias) };
     let mut attributes = Vec::new();
 
-    if (type_attr.wTypeFlags & TYPEFLAG_FHIDDEN.0 as u16) == 0 {
+    if !TypeFlags::from_bits_truncate(type_attr.wTypeFlags).contains(TypeFlags::FHIDDEN) {
         attributes.push("public");
     }
 
@@ -1068,25 +1071,26 @@ where
         };
 
         // Param attributes
-        let param_flags = unsafe { elem_desc.Anonymous.paramdesc.wParamFlags };
+        let param_flags_raw = unsafe { elem_desc.Anonymous.paramdesc.wParamFlags };
+        let param_flags = ParamFlags::from_bits_truncate(param_flags_raw.0);
         let mut attrs: Vec<String> = Vec::new();
-        if (param_flags.0 & 1) != 0 {
+        if param_flags.contains(ParamFlags::FIN) {
             attrs.push("in".to_string());
         } // PARAMFLAG_FIN
-        if (param_flags.0 & 2) != 0 {
+        if param_flags.contains(ParamFlags::FOUT) {
             attrs.push("out".to_string());
         } // PARAMFLAG_FOUT
-        if (param_flags.0 & 4) != 0 {
+        if param_flags.contains(ParamFlags::FLCID) {
             attrs.push("lcid".to_string());
         } // PARAMFLAG_FLCID
-        if (param_flags.0 & 8) != 0 {
+        if param_flags.contains(ParamFlags::FRETVAL) {
             attrs.push("retval".to_string());
             has_retval = true;
         } // PARAMFLAG_FRETVAL
-        if (param_flags.0 & 16) != 0 {
+        if param_flags.contains(ParamFlags::FOPT) {
             attrs.push("optional".to_string());
         } // PARAMFLAG_FOPT
-        if (param_flags.0 & 32) != 0 {
+        if param_flags.contains(ParamFlags::FHASDEFAULT) {
             let default_val = unsafe {
                 let param_desc_ex = elem_desc.Anonymous.paramdesc.pparamdescex;
                 if !param_desc_ex.is_null() {

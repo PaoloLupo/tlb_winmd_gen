@@ -1,5 +1,6 @@
 mod chm_doc;
 mod error;
+mod flags;
 mod idlgen;
 mod project_gen;
 mod ui;
