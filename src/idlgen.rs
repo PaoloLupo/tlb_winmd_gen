@@ -1214,12 +1214,22 @@ unsafe fn type_desc_to_string(type_info: &ITypeInfo, tdesc: &TYPEDESC) -> String
         VT_VOID => "void".to_string(),
         VT_HRESULT => "HRESULT".to_string(),
         VT_PTR => {
-            let pointed_type = unsafe { type_desc_to_string(type_info, &*tdesc.Anonymous.lptdesc) };
-            format!("{}*", pointed_type)
+            if unsafe { tdesc.Anonymous.lptdesc.is_null() } {
+                "void*".to_string()
+            } else {
+                let pointed_type =
+                    unsafe { type_desc_to_string(type_info, &*tdesc.Anonymous.lptdesc) };
+                format!("{}*", pointed_type)
+            }
         }
         VT_SAFEARRAY => {
-            let element_type = unsafe { type_desc_to_string(type_info, &*tdesc.Anonymous.lptdesc) };
-            format!("SAFEARRAY({})", element_type)
+            if unsafe { tdesc.Anonymous.lptdesc.is_null() } {
+                "SAFEARRAY(void)".to_string()
+            } else {
+                let element_type =
+                    unsafe { type_desc_to_string(type_info, &*tdesc.Anonymous.lptdesc) };
+                format!("SAFEARRAY({})", element_type)
+            }
         }
         VT_USERDEFINED => {
             if let Ok(ref_type_info) = unsafe { type_info.GetRefTypeInfo(tdesc.Anonymous.hreftype) }
@@ -1269,9 +1279,19 @@ unsafe fn variant_to_string(variant: &VARIANT) -> String {
             }
             VT_EMPTY => "".to_string(),
             VT_NULL => "null".to_string(),
-            // Added basic support for VT_UI1 (unsigned char / byte) often used in constants
+            VT_I1 => variant.Anonymous.Anonymous.Anonymous.cVal.to_string(),
             VT_UI1 => variant.Anonymous.Anonymous.Anonymous.bVal.to_string(),
-            VT_I1 => variant.Anonymous.Anonymous.Anonymous.cVal.to_string(), // char
+            VT_UI2 => variant.Anonymous.Anonymous.Anonymous.uiVal.to_string(),
+            VT_UI4 => variant.Anonymous.Anonymous.Anonymous.ulVal.to_string(),
+            VT_INT => variant.Anonymous.Anonymous.Anonymous.intVal.to_string(),
+            VT_UINT => variant.Anonymous.Anonymous.Anonymous.uintVal.to_string(),
+            VT_CY => {
+                let cy_val = variant.Anonymous.Anonymous.Anonymous.cyVal.int64;
+                // Currency is int64 scaled by 10000
+                format!("{}", cy_val as f64 / 10000.0)
+            }
+            VT_DATE => variant.Anonymous.Anonymous.Anonymous.date.to_string(),
+            VT_ERROR => format!("0x{:X}", variant.Anonymous.Anonymous.Anonymous.scode),
             _ => format!("/* vt: {} */", variant.Anonymous.Anonymous.vt.0),
         }
     }
