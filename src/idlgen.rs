@@ -22,6 +22,128 @@ use windows::{
 };
 use windows_core::{BSTR, HSTRING, IUnknown};
 
+// RAII Wrappers for COM structures
+
+struct SafeTypeAttr<'a> {
+    type_info: &'a ITypeInfo,
+    attr: *mut TYPEATTR,
+}
+
+impl<'a> SafeTypeAttr<'a> {
+    fn new(type_info: &'a ITypeInfo) -> Result<Self, Error> {
+        unsafe {
+            let attr = type_info.GetTypeAttr()?;
+            Ok(Self { type_info, attr })
+        }
+    }
+}
+
+impl<'a> std::ops::Deref for SafeTypeAttr<'a> {
+    type Target = TYPEATTR;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.attr }
+    }
+}
+
+impl<'a> Drop for SafeTypeAttr<'a> {
+    fn drop(&mut self) {
+        unsafe {
+            self.type_info.ReleaseTypeAttr(self.attr);
+        }
+    }
+}
+
+struct SafeFuncDesc<'a> {
+    type_info: &'a ITypeInfo,
+    desc: *mut FUNCDESC,
+}
+
+impl<'a> SafeFuncDesc<'a> {
+    fn new(type_info: &'a ITypeInfo, index: u32) -> Result<Self, Error> {
+        unsafe {
+            let desc = type_info.GetFuncDesc(index)?;
+            Ok(Self { type_info, desc })
+        }
+    }
+}
+
+impl<'a> std::ops::Deref for SafeFuncDesc<'a> {
+    type Target = FUNCDESC;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.desc }
+    }
+}
+
+impl<'a> Drop for SafeFuncDesc<'a> {
+    fn drop(&mut self) {
+        unsafe {
+            self.type_info.ReleaseFuncDesc(self.desc);
+        }
+    }
+}
+
+struct SafeVarDesc<'a> {
+    type_info: &'a ITypeInfo,
+    desc: *mut VARDESC,
+}
+
+impl<'a> SafeVarDesc<'a> {
+    fn new(type_info: &'a ITypeInfo, index: u32) -> Result<Self, Error> {
+        unsafe {
+            let desc = type_info.GetVarDesc(index)?;
+            Ok(Self { type_info, desc })
+        }
+    }
+}
+
+impl<'a> std::ops::Deref for SafeVarDesc<'a> {
+    type Target = VARDESC;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.desc }
+    }
+}
+
+impl<'a> Drop for SafeVarDesc<'a> {
+    fn drop(&mut self) {
+        unsafe {
+            self.type_info.ReleaseVarDesc(self.desc);
+        }
+    }
+}
+
+struct SafeLibAttr<'a> {
+    tlib: &'a ITypeLib,
+    attr: *mut TLIBATTR,
+}
+
+impl<'a> SafeLibAttr<'a> {
+    fn new(tlib: &'a ITypeLib) -> Result<Self, Error> {
+        unsafe {
+            let attr = tlib.GetLibAttr()?;
+            Ok(Self { tlib, attr })
+        }
+    }
+}
+
+impl<'a> std::ops::Deref for SafeLibAttr<'a> {
+    type Target = TLIBATTR;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.attr }
+    }
+}
+
+impl<'a> Drop for SafeLibAttr<'a> {
+    fn drop(&mut self) {
+        unsafe {
+            self.tlib.ReleaseTLibAttr(self.attr);
+        }
+    }
+}
+
 pub struct TypeLibInfo {
     tlib: Option<ITypeLib>,
 }
@@ -35,7 +157,9 @@ impl TypeLibInfo {
         unsafe {
             let _ = CoInitialize(None);
         }
-        let path_str = path.to_str().ok_or(Error::TypeLibNotLoaded)?;
+
+        let abs_path = path.canonicalize().map_err(|e| Error::IoError(e))?;
+        let path_str = abs_path.to_str().ok_or(Error::TypeLibNotLoaded)?;
         let path_hstring = HSTRING::from(path_str);
         let path_pcwstr = PCWSTR::from_raw(path_hstring.as_ptr());
 
@@ -44,9 +168,11 @@ impl TypeLibInfo {
         Ok(())
     }
 
-    fn get_lib_attr(&self) -> Result<*mut TLIBATTR, Error> {
+    // Helper using RAII wrapper
+    #[allow(dead_code)]
+    fn get_lib_attr_safe(&self) -> Result<SafeLibAttr<'_>, Error> {
         if let Some(tlib) = &self.tlib {
-            unsafe { Ok(tlib.GetLibAttr()?) }
+            SafeLibAttr::new(tlib)
         } else {
             Err(Error::TypeLibNotLoaded)
         }
@@ -90,24 +216,22 @@ impl TypeLibInfo {
 
     pub fn get_type_name_and_kind(&self, index: u32) -> Result<(String, String), Error> {
         let type_info = self.get_type_info(index)?;
-        unsafe {
-            let type_attr = type_info.GetTypeAttr()?;
-            let kind = match (*type_attr).typekind {
-                TKIND_ENUM => "Enum",
-                TKIND_RECORD => "Record",
-                TKIND_MODULE => "Module",
-                TKIND_INTERFACE => "Interface",
-                TKIND_DISPATCH => "Dispatch",
-                TKIND_COCLASS => "CoClass",
-                TKIND_ALIAS => "Alias",
-                TKIND_UNION => "Union",
-                _ => "Unknown",
-            }
-            .to_string();
-            let (name, _) = get_type_documentation(&type_info, -1);
-            type_info.ReleaseTypeAttr(type_attr);
-            Ok((name, kind))
+        let type_attr = SafeTypeAttr::new(&type_info)?;
+
+        let kind = match type_attr.typekind {
+            TKIND_ENUM => "Enum",
+            TKIND_RECORD => "Record",
+            TKIND_MODULE => "Module",
+            TKIND_INTERFACE => "Interface",
+            TKIND_DISPATCH => "Dispatch",
+            TKIND_COCLASS => "CoClass",
+            TKIND_ALIAS => "Alias",
+            TKIND_UNION => "Union",
+            _ => "Unknown",
         }
+        .to_string();
+        let (name, _) = unsafe { get_type_documentation(&type_info, -1) };
+        Ok((name, kind))
     }
 
     pub fn get_type_idl(&self, index: u32) -> Result<String, Error> {
@@ -120,17 +244,14 @@ impl TypeLibInfo {
     pub fn get_type_methods(&self, index: u32) -> Result<Vec<MethodInfo>, Error> {
         let type_info = self.get_type_info(index)?;
         let mut methods = Vec::new();
-        unsafe {
-            let type_attr = type_info.GetTypeAttr()?;
-            for i in 0..(*type_attr).cFuncs {
-                if let Ok(func_desc) = type_info.GetFuncDesc(i as u32) {
-                    if let Ok(info) = get_function_info(&type_info, &*func_desc) {
-                        methods.push(info);
-                    }
-                    type_info.ReleaseFuncDesc(func_desc);
+        let type_attr = SafeTypeAttr::new(&type_info)?;
+
+        for i in 0..type_attr.cFuncs {
+            if let Ok(func_desc) = SafeFuncDesc::new(&type_info, i as u32) {
+                if let Ok(info) = get_function_info(&type_info, &func_desc) {
+                    methods.push(info);
                 }
             }
-            type_info.ReleaseTypeAttr(type_attr);
         }
         Ok(methods)
     }
@@ -138,19 +259,16 @@ impl TypeLibInfo {
     pub fn get_type_enums(&self, index: u32) -> Result<Vec<EnumItemInfo>, Error> {
         let type_info = self.get_type_info(index)?;
         let mut enums = Vec::new();
-        unsafe {
-            let type_attr = type_info.GetTypeAttr()?;
-            if (*type_attr).typekind == TKIND_ENUM {
-                for i in 0..(*type_attr).cVars {
-                    if let Ok(var_desc) = type_info.GetVarDesc(i as u32) {
-                        if let Ok(info) = get_enum_info(&type_info, &*var_desc) {
-                            enums.push(info);
-                        }
-                        type_info.ReleaseVarDesc(var_desc);
+        let type_attr = SafeTypeAttr::new(&type_info)?;
+
+        if type_attr.typekind == TKIND_ENUM {
+            for i in 0..type_attr.cVars {
+                if let Ok(var_desc) = SafeVarDesc::new(&type_info, i as u32) {
+                    if let Ok(info) = unsafe { get_enum_info(&type_info, &var_desc) } {
+                        enums.push(info);
                     }
                 }
             }
-            type_info.ReleaseTypeAttr(type_attr);
         }
         Ok(enums)
     }
@@ -191,10 +309,7 @@ unsafe fn get_enum_info(type_info: &ITypeInfo, var_desc: &VARDESC) -> Result<Enu
     Ok(EnumItemInfo { name, value })
 }
 
-unsafe fn get_function_info(
-    type_info: &ITypeInfo,
-    func_desc: &FUNCDESC,
-) -> Result<MethodInfo, Error> {
+fn get_function_info(type_info: &ITypeInfo, func_desc: &FUNCDESC) -> Result<MethodInfo, Error> {
     let memid = func_desc.memid;
     if memid >= 0x60000000 && memid < 0x60020000 {
         return Err(Error::IoError(std::io::Error::new(
@@ -288,11 +403,6 @@ unsafe fn get_function_info(
             real_ret_type = retval_param.type_name.trim_end_matches('*').to_string();
             // Remove the retval param from the list as it's now the return value
             params.remove(pos);
-        } else {
-            // If no retval, it returns HRESULT (or whatever raw type), but usually we want to show HRESULT if it is one.
-            // But wait, type_desc_to_string returns "HRESULT" for VT_HRESULT.
-            // If it is HRESULT and no retval, it's just void in high-level languages usually, or HRESULT.
-            // Let's keep it as is for now.
         }
         ret_type = real_ret_type;
     }
@@ -323,7 +433,8 @@ where
     let mut type_lib_info = TypeLibInfo::new();
     type_lib_info.load_type_lib(tlb_path)?;
 
-    let lib_attr = unsafe { &*type_lib_info.get_lib_attr()? };
+    // Use SafeLibAttr which automatically releases on drop
+    let lib_attr = type_lib_info.get_lib_attr_safe()?;
     let (name, doc_string) = type_lib_info.get_documentation(-1)?;
 
     writeln!(out, "// Decompilated from {}", tlb_path.display())?;
@@ -369,10 +480,9 @@ where
     // Forward declarations
     for i in 0..count {
         if let Ok(type_info) = type_lib_info.get_type_info(i) {
-            unsafe {
-                let type_attr: *mut TYPEATTR = type_info.GetTypeAttr()?;
-                let type_kind = (*type_attr).typekind;
-                let (name, _) = get_type_documentation(&type_info, -1);
+            if let Ok(type_attr) = SafeTypeAttr::new(&type_info) {
+                let type_kind = type_attr.typekind;
+                let (name, _) = unsafe { get_type_documentation(&type_info, -1) };
 
                 match type_kind {
                     TKIND_INTERFACE => {
@@ -386,35 +496,32 @@ where
                     }
                     _ => {}
                 }
-                type_info.ReleaseTypeAttr(type_attr);
             }
         }
     }
     writeln!(out, "")?;
 
+    // Enums first
     let count = type_lib_info.get_type_info_count();
     for i in 0..count {
         if let Ok(type_info) = type_lib_info.get_type_info(i) {
-            unsafe {
-                let type_attr = type_info.GetTypeAttr()?;
-                if (*type_attr).typekind == TKIND_ENUM {
+            if let Ok(type_attr) = SafeTypeAttr::new(&type_info) {
+                if type_attr.typekind == TKIND_ENUM {
                     print_type_info(&type_info, &mut out)?;
                 }
-                type_info.ReleaseTypeAttr(type_attr);
             }
         }
     }
     writeln!(out, "")?;
 
+    // Rest of types
     let count = type_lib_info.get_type_info_count();
     for i in 0..count {
         if let Ok(type_info) = type_lib_info.get_type_info(i) {
-            unsafe {
-                let type_attr = type_info.GetTypeAttr()?;
-                if (*type_attr).typekind != TKIND_ENUM {
+            if let Ok(type_attr) = SafeTypeAttr::new(&type_info) {
+                if type_attr.typekind != TKIND_ENUM {
                     print_type_info(&type_info, &mut out)?;
                 }
-                type_info.ReleaseTypeAttr(type_attr);
             }
         }
     }
@@ -427,324 +534,393 @@ fn print_interface_header<W>(type_info: &ITypeInfo, out: &mut W) -> Result<(), E
 where
     W: std::io::Write,
 {
-    unsafe {
-        let type_attr: *mut TYPEATTR = type_info.GetTypeAttr()?;
-        let type_kind = (*type_attr).typekind;
-        let guid = (*type_attr).guid;
-        let (_, doc_string) = get_type_documentation(type_info, -1);
-        let type_flags = (*type_attr).wTypeFlags;
+    let type_attr = SafeTypeAttr::new(type_info)?;
+    let type_kind = type_attr.typekind;
+    let guid = type_attr.guid;
+    let (_, doc_string) = unsafe { get_type_documentation(type_info, -1) };
+    let type_flags = type_attr.wTypeFlags;
 
-        if type_kind == TKIND_INTERFACE
-            || type_kind == TKIND_DISPATCH
-            || type_kind == TKIND_COCLASS
-            || type_kind == TKIND_ENUM
-        {
-            let mut attributes = Vec::new();
-            attributes.push(format!("uuid({:?})", guid));
+    if type_kind == TKIND_INTERFACE
+        || type_kind == TKIND_DISPATCH
+        || type_kind == TKIND_COCLASS
+        || type_kind == TKIND_ENUM
+    {
+        let mut attributes = Vec::new();
+        attributes.push(format!("uuid({:?})", guid));
 
-            if !doc_string.is_empty() {
-                attributes.push(format!("helpstring(\"{}\")", doc_string));
+        if !doc_string.is_empty() {
+            attributes.push(format!("helpstring(\"{}\")", doc_string));
+        }
+
+        let flags_map = [
+            (TYPEFLAG_FHIDDEN.0 as u16, "hidden"),
+            (TYPEFLAG_FDUAL.0 as u16, "dual"),
+            (TYPEFLAG_FRESTRICTED.0 as u16, "restricted"),
+            (TYPEFLAG_FNONEXTENSIBLE.0 as u16, "nonextensible"),
+            (TYPEFLAG_FOLEAUTOMATION.0 as u16, "oleautomation"),
+        ];
+
+        for (flag, attr) in flags_map {
+            if (type_flags & flag) != 0 {
+                attributes.push(attr.to_string());
             }
+        }
 
-            let flags_map = [
-                (TYPEFLAG_FHIDDEN.0 as u16, "hidden"),
-                (TYPEFLAG_FDUAL.0 as u16, "dual"),
-                (TYPEFLAG_FRESTRICTED.0 as u16, "restricted"),
-                (TYPEFLAG_FNONEXTENSIBLE.0 as u16, "nonextensible"),
-                (TYPEFLAG_FOLEAUTOMATION.0 as u16, "oleautomation"),
-            ];
+        if type_flags & (TYPEFLAG_FDISPATCHABLE.0 as u16 | TYPEFLAG_FDUAL.0 as u16) != 0 {
+            attributes.push("oleautomation".to_string());
+        }
 
-            for (flag, attr) in flags_map {
-                if (type_flags & flag) != 0 {
-                    attributes.push(attr.to_string());
-                }
-            }
-
-            if type_flags & (TYPEFLAG_FDISPATCHABLE.0 as u16 | TYPEFLAG_FDUAL.0 as u16) != 0 {
-                attributes.push("oleautomation".to_string());
-            }
-
-            // Custom attributes
-            if let Ok(type_info2) = type_info.cast::<ITypeInfo2>() {
+        // Custom attributes
+        if let Ok(type_info2) = type_info.cast::<ITypeInfo2>() {
+            unsafe {
                 let custom_attrs = get_custom_data(&type_info2)?;
                 attributes.extend(custom_attrs);
             }
-
-            writeln!(out, "    [")?;
-            for (i, attr) in attributes.iter().enumerate() {
-                let suffix = if i == attributes.len() - 1 { "" } else { "," };
-                writeln!(out, "      {}{}", attr, suffix)?;
-            }
-            writeln!(out, "    ]")?;
         }
 
-        Ok(())
+        writeln!(out, "    [")?;
+        for (i, attr) in attributes.iter().enumerate() {
+            let suffix = if i == attributes.len() - 1 { "" } else { "," };
+            writeln!(out, "      {}{}", attr, suffix)?;
+        }
+        writeln!(out, "    ]")?;
     }
+
+    Ok(())
 }
 
 fn print_type_info<W>(type_info: &ITypeInfo, out: &mut W) -> Result<(), Error>
 where
     W: std::io::Write,
 {
-    unsafe {
-        let type_attr: *mut TYPEATTR = type_info.GetTypeAttr()?;
+    let type_attr = SafeTypeAttr::new(type_info)?;
 
-        let guid = (*type_attr).guid;
+    let guid = type_attr.guid;
 
-        if guid == IUnknown::IID || guid == IDispatch::IID {
-            type_info.ReleaseTypeAttr(type_attr);
-            return Ok(());
-        }
+    if guid == IUnknown::IID || guid == IDispatch::IID {
+        return Ok(());
+    }
 
-        let type_kind = (*type_attr).typekind;
-        let type_flags = (*type_attr).wTypeFlags;
+    let type_kind = type_attr.typekind;
+    let type_flags = type_attr.wTypeFlags;
 
-        // Special handling for pure dispinterfaces: extract the inherited interface
-        if type_kind == TKIND_DISPATCH && (type_flags & TYPEFLAG_FDUAL.0 as u16) == 0 {
-            if (*type_attr).cImplTypes > 0 {
-                if let Ok(href) = type_info.GetRefTypeOfImplType(0) {
-                    if let Ok(ref_type_info) = type_info.GetRefTypeInfo(href) {
-                        if let Ok(ref_attr) = ref_type_info.GetTypeAttr() {
-                            let ref_kind = (*ref_attr).typekind;
-                            let ref_flags = (*ref_attr).wTypeFlags;
-                            let is_dual = (ref_flags & TYPEFLAG_FDUAL.0 as u16) != 0;
-                            let ref_guid = (*ref_attr).guid;
-                            ref_type_info.ReleaseTypeAttr(ref_attr);
+    // Special handling for pure dispinterfaces: extract the inherited interface
+    if type_kind == TKIND_DISPATCH && (type_flags & TYPEFLAG_FDUAL.0 as u16) == 0 {
+        if type_attr.cImplTypes > 0 {
+            if let Ok(href) = unsafe { type_info.GetRefTypeOfImplType(0) } {
+                if let Ok(ref_type_info) = unsafe { type_info.GetRefTypeInfo(href) } {
+                    if let Ok(ref_attr) = SafeTypeAttr::new(&ref_type_info) {
+                        let ref_kind = ref_attr.typekind;
+                        let ref_flags = ref_attr.wTypeFlags;
+                        let is_dual = (ref_flags & TYPEFLAG_FDUAL.0 as u16) != 0;
+                        let ref_guid = ref_attr.guid;
 
-                            if (ref_kind == TKIND_INTERFACE
-                                || (ref_kind == TKIND_DISPATCH && is_dual))
-                                && ref_guid != IUnknown::IID
-                                && ref_guid != IDispatch::IID
-                            {
-                                type_info.ReleaseTypeAttr(type_attr);
-                                return print_type_info(&ref_type_info, out);
-                            }
+                        // We must drop ref_attr before calling recursive print to avoid holding it too long?
+                        // No, RAII handles it.
+
+                        if (ref_kind == TKIND_INTERFACE || (ref_kind == TKIND_DISPATCH && is_dual))
+                            && ref_guid != IUnknown::IID
+                            && ref_guid != IDispatch::IID
+                        {
+                            return print_type_info(&ref_type_info, out);
                         }
                     }
                 }
             }
         }
+    }
 
-        let guid = (*type_attr).guid;
-        let (name, doc_string) = get_type_documentation(type_info, -1);
+    let (name, _) = unsafe { get_type_documentation(type_info, -1) };
 
-        print_interface_header(type_info, out)?;
+    print_interface_header(type_info, out)?;
 
-        match type_kind {
-            TKIND_INTERFACE => {
-                // Find base interface
-                let mut base_name = String::new();
-                if (*type_attr).cImplTypes > 0 {
-                    if let Ok(href) = type_info.GetRefTypeOfImplType(0) {
-                        if let Ok(base_info) = type_info.GetRefTypeInfo(href) {
-                            base_name = get_name(&base_info);
-                        }
+    match type_kind {
+        TKIND_INTERFACE => print_interface_body(type_info, &type_attr, &name, out)?,
+        TKIND_DISPATCH => print_dispatch_body(type_info, &type_attr, &name, out)?,
+        TKIND_ENUM => print_enum_body(type_info, &type_attr, &name, out)?,
+        TKIND_COCLASS => print_coclass_body(type_info, &type_attr, &name, out)?,
+        TKIND_ALIAS => print_alias_body(type_info, &type_attr, &name, out)?,
+        TKIND_RECORD => print_record_body(type_info, &type_attr, &name, out)?,
+        TKIND_MODULE => print_module_body(type_info, &type_attr, &name, out)?,
+        _ => {
+            writeln!(out, "    // Unsupported type kind: {:?}", type_kind)?;
+        }
+    }
+    writeln!(out, "")?;
+
+    Ok(())
+}
+
+fn print_interface_body<W>(
+    type_info: &ITypeInfo,
+    type_attr: &TYPEATTR,
+    name: &str,
+    out: &mut W,
+) -> Result<(), Error>
+where
+    W: std::io::Write,
+{
+    // Find base interface
+    let mut base_name = String::new();
+    if type_attr.cImplTypes > 0 {
+        if let Ok(href) = unsafe { type_info.GetRefTypeOfImplType(0) } {
+            if let Ok(base_info) = unsafe { type_info.GetRefTypeInfo(href) } {
+                base_name = unsafe { get_name(&base_info) };
+            }
+        }
+    }
+
+    if !base_name.is_empty() {
+        writeln!(out, "    interface {} : {} {{", name, base_name)?;
+    } else {
+        writeln!(out, "    interface {} {{", name)?;
+    }
+
+    // Print properties and methods
+    for i in 0..type_attr.cFuncs {
+        if let Ok(func_desc) = SafeFuncDesc::new(type_info, i as u32) {
+            print_function(type_info, &func_desc, out)?;
+        }
+    }
+
+    writeln!(out, "    }};")?;
+    Ok(())
+}
+
+fn print_dispatch_body<W>(
+    type_info: &ITypeInfo,
+    type_attr: &TYPEATTR,
+    name: &str,
+    out: &mut W,
+) -> Result<(), Error>
+where
+    W: std::io::Write,
+{
+    let is_dual = (type_attr.wTypeFlags & TYPEFLAG_FDUAL.0 as u16) != 0;
+    if is_dual {
+        // Dual interface: get the partner interface (TKIND_INTERFACE)
+        // The partner interface is usually at impl type -1 (0xFFFFFFFF)
+        let mut partner_type_info = None;
+        if let Ok(href) = unsafe { type_info.GetRefTypeOfImplType(u32::MAX) } {
+            if let Ok(ref_type_info) = unsafe { type_info.GetRefTypeInfo(href) } {
+                partner_type_info = Some(ref_type_info);
+            }
+        }
+
+        if let Some(partner_info) = partner_type_info {
+            // Use the partner interface for everything
+            let partner_attr = SafeTypeAttr::new(&partner_info)?;
+
+            // Find base interface of the partner
+            let mut base_name = String::new();
+
+            if partner_attr.cImplTypes > 0 {
+                if let Ok(href) = unsafe { partner_info.GetRefTypeOfImplType(0) } {
+                    if let Ok(base_info) = unsafe { partner_info.GetRefTypeInfo(href) } {
+                        base_name = unsafe { get_name(&base_info) };
                     }
                 }
+            }
 
-                if !base_name.is_empty() {
-                    writeln!(out, "    interface {} : {} {{", name, base_name)?;
+            if !base_name.is_empty() {
+                writeln!(out, "    interface {} : {} {{", name, base_name)?;
+            } else {
+                writeln!(out, "    interface {} {{", name)?;
+            }
+
+            // Print methods
+            for i in 0..partner_attr.cFuncs {
+                if let Ok(func_desc) = SafeFuncDesc::new(&partner_info, i as u32) {
+                    print_function(&partner_info, &func_desc, out)?;
+                }
+            }
+            writeln!(out, "    }};")?;
+        } else {
+            // Fallback if partner not found (shouldn't happen for valid duals)
+            writeln!(out, "    interface {} : IDispatch {{", name)?;
+            for i in 7..type_attr.cFuncs {
+                // Skip IDispatch methods
+                if let Ok(func_desc) = SafeFuncDesc::new(type_info, i as u32) {
+                    print_function(type_info, &func_desc, out)?;
+                }
+            }
+            writeln!(out, "    }};")?;
+        }
+    } else {
+        // Non-dual dispinterface treated as interface : IDispatch
+        writeln!(out, "    interface {} : IDispatch {{", name)?;
+        for i in 0..type_attr.cFuncs {
+            if let Ok(func_desc) = SafeFuncDesc::new(type_info, i as u32) {
+                print_function(type_info, &func_desc, out)?;
+            }
+        }
+        writeln!(out, "    }};")?;
+    }
+    Ok(())
+}
+
+fn print_enum_body<W>(
+    type_info: &ITypeInfo,
+    type_attr: &TYPEATTR,
+    name: &str,
+    out: &mut W,
+) -> Result<(), Error>
+where
+    W: std::io::Write,
+{
+    writeln!(out, "    enum {} {{", name)?;
+    for i in 0..type_attr.cVars {
+        if let Ok(var_desc) = SafeVarDesc::new(type_info, i as u32) {
+            print_var(type_info, &var_desc, out)?;
+        }
+    }
+    writeln!(out, "    }};")?;
+    Ok(())
+}
+
+fn print_coclass_body<W>(
+    type_info: &ITypeInfo,
+    type_attr: &TYPEATTR,
+    name: &str,
+    out: &mut W,
+) -> Result<(), Error>
+where
+    W: std::io::Write,
+{
+    writeln!(out, "    coclass {} {{", name)?;
+    for i in 0..type_attr.cImplTypes {
+        if let Ok(href) = unsafe { type_info.GetRefTypeOfImplType(i as u32) } {
+            if let Ok(ref_type_info) = unsafe { type_info.GetRefTypeInfo(href) } {
+                let ref_name = unsafe { get_name(&ref_type_info) };
+                let impl_flags = unsafe {
+                    type_info
+                        .GetImplTypeFlags(i as u32)
+                        .unwrap_or(IMPLTYPEFLAGS::default())
+                };
+                // Check for [default]
+                let default_str = if (impl_flags.0 & 1) != 0 {
+                    "[default] "
                 } else {
-                    writeln!(out, "    interface {} {{", name)?;
-                }
-
-                // Print properties and methods
-                for i in 0..(*type_attr).cFuncs {
-                    if let Ok(func_desc) = type_info.GetFuncDesc(i as u32) {
-                        print_function(type_info, &*func_desc, out)?;
-                        type_info.ReleaseFuncDesc(func_desc);
-                    }
-                }
-
-                writeln!(out, "    }};")?;
-            }
-            TKIND_DISPATCH => {
-                let is_dual = (type_flags & TYPEFLAG_FDUAL.0 as u16) != 0;
-                if is_dual {
-                    // Dual interface: get the partner interface (TKIND_INTERFACE)
-                    // The partner interface is usually at impl type -1 (0xFFFFFFFF)
-                    let mut partner_type_info = None;
-                    if let Ok(href) = type_info.GetRefTypeOfImplType(u32::MAX) {
-                        if let Ok(ref_type_info) = type_info.GetRefTypeInfo(href) {
-                            partner_type_info = Some(ref_type_info);
-                        }
-                    }
-
-                    if let Some(partner_info) = partner_type_info {
-                        // Use the partner interface for everything
-                        let partner_attr = partner_info.GetTypeAttr()?;
-
-                        // Find base interface of the partner
-                        let mut base_name = String::new();
-
-                        if (*partner_attr).cImplTypes > 0 {
-                            if let Ok(href) = partner_info.GetRefTypeOfImplType(0) {
-                                if let Ok(base_info) = partner_info.GetRefTypeInfo(href) {
-                                    base_name = get_name(&base_info);
-                                }
-                            }
-                        }
-
-                        if !base_name.is_empty() {
-                            writeln!(out, "    interface {} : {} {{", name, base_name)?;
-                        } else {
-                            writeln!(out, "    interface {} {{", name)?;
-                        }
-
-                        // Print methods
-                        for i in 0..(*partner_attr).cFuncs {
-                            if let Ok(func_desc) = partner_info.GetFuncDesc(i as u32) {
-                                print_function(&partner_info, &*func_desc, out)?;
-                                partner_info.ReleaseFuncDesc(func_desc);
-                            }
-                        }
-
-                        partner_info.ReleaseTypeAttr(partner_attr);
-                        writeln!(out, "    }};")?;
-                    } else {
-                        // Fallback if partner not found (shouldn't happen for valid duals)
-                        writeln!(out, "    interface {} : IDispatch {{", name)?;
-                        for i in 7..(*type_attr).cFuncs {
-                            // Skip IDispatch methods
-                            if let Ok(func_desc) = type_info.GetFuncDesc(i as u32) {
-                                print_function(type_info, &*func_desc, out)?;
-                                type_info.ReleaseFuncDesc(func_desc);
-                            }
-                        }
-                        writeln!(out, "    }};")?;
-                    }
+                    ""
+                };
+                // Check for [source] (2)
+                let source_str = if (impl_flags.0 & 2) != 0 {
+                    "[source] "
                 } else {
-                    // Non-dual dispinterface treated as interface : IDispatch
-                    writeln!(out, "    interface {} : IDispatch {{", name)?;
-                    for i in 0..(*type_attr).cFuncs {
-                        if let Ok(func_desc) = type_info.GetFuncDesc(i as u32) {
-                            print_function(type_info, &*func_desc, out)?;
-                            type_info.ReleaseFuncDesc(func_desc);
-                        }
-                    }
-                    writeln!(out, "    }};")?;
-                }
-            }
-            TKIND_ENUM => {
-                writeln!(out, "    enum {} {{", name)?;
-                for i in 0..(*type_attr).cVars {
-                    if let Ok(var_desc) = type_info.GetVarDesc(i as u32) {
-                        print_var(type_info, &*var_desc, out)?;
-                        type_info.ReleaseVarDesc(var_desc);
-                    }
-                }
-                writeln!(out, "    }};")?;
-            }
-            TKIND_COCLASS => {
-                writeln!(out, "    coclass {} {{", name)?;
-                for i in 0..(*type_attr).cImplTypes {
-                    if let Ok(href) = type_info.GetRefTypeOfImplType(i as u32) {
-                        if let Ok(ref_type_info) = type_info.GetRefTypeInfo(href) {
-                            let ref_name = get_name(&ref_type_info);
-                            let impl_flags = type_info
-                                .GetImplTypeFlags(i as u32)
-                                .unwrap_or(IMPLTYPEFLAGS::default());
-                            // Check for [default]
-                            let default_str = if (impl_flags.0 & 1) != 0 {
-                                "[default] "
-                            } else {
-                                ""
-                            };
-                            // Check for [source] (2)
-                            let source_str = if (impl_flags.0 & 2) != 0 {
-                                "[source] "
-                            } else {
-                                ""
-                            };
-
-                            writeln!(
-                                out,
-                                "        {}{}{} {};",
-                                default_str, source_str, "interface", ref_name
-                            )?;
-                        }
-                    }
-                }
-                writeln!(out, "    }};")?;
-            }
-            TKIND_ALIAS => {
-                let alias_type_name = type_desc_to_string(type_info, &(*type_attr).tdescAlias);
-                let mut attributes = Vec::new();
-
-                if (type_flags & TYPEFLAG_FHIDDEN.0 as u16) == 0 {
-                    attributes.push("public");
-                }
-
-                let attr_str = if !attributes.is_empty() {
-                    format!("[{}] ", attributes.join(", "))
-                } else {
-                    String::new()
+                    ""
                 };
 
-                writeln!(out, "    typedef {}{} {};", attr_str, alias_type_name, name)?;
-            }
-            TKIND_RECORD => {
-                writeln!(out, "    typedef struct tag{} {{", name)?;
-                for i in 0..(*type_attr).cVars {
-                    if let Ok(var_desc) = type_info.GetVarDesc(i as u32) {
-                        print_record_member(type_info, &*var_desc, out)?;
-                        type_info.ReleaseVarDesc(var_desc);
-                    }
-                }
-                writeln!(out, "    }} {};", name)?;
-            }
-            TKIND_MODULE => {
-                let mut dll_name = String::new();
-                if (*type_attr).cFuncs > 0 {
-                    if let Ok(func_desc) = type_info.GetFuncDesc(0) {
-                        if let Ok(dll) =
-                            get_dll_entry(type_info, (*func_desc).memid, (*func_desc).invkind)
-                        {
-                            dll_name = dll;
-                        }
-                        type_info.ReleaseFuncDesc(func_desc);
-                    }
-                }
-
-                let mut attributes = Vec::new();
-                if !dll_name.is_empty() {
-                    attributes.push(format!("dllname(\"{}\")", dll_name));
-                }
-                attributes.push(format!("uuid({:?})", guid));
-                if !doc_string.is_empty() {
-                    attributes.push(format!("helpstring(\"{}\")", doc_string));
-                }
-
-                writeln!(out, "    [")?;
-                for (i, attr) in attributes.iter().enumerate() {
-                    let suffix = if i == attributes.len() - 1 { "" } else { "," };
-                    writeln!(out, "      {}{}", attr, suffix)?;
-                }
-                writeln!(out, "    ]")?;
-                writeln!(out, "    module {} {{", name)?;
-
-                for i in 0..(*type_attr).cVars {
-                    if let Ok(var_desc) = type_info.GetVarDesc(i as u32) {
-                        print_module_const(type_info, &*var_desc, out)?;
-                        type_info.ReleaseVarDesc(var_desc);
-                    }
-                }
-
-                for i in 0..(*type_attr).cFuncs {
-                    if let Ok(func_desc) = type_info.GetFuncDesc(i as u32) {
-                        type_info.ReleaseFuncDesc(func_desc);
-                    }
-                }
-                writeln!(out, "    }};")?;
-            }
-            _ => {
-                writeln!(out, "    // Unsupported type kind: {:?}", type_kind)?;
+                writeln!(
+                    out,
+                    "        {}{}{} {};",
+                    default_str, source_str, "interface", ref_name
+                )?;
             }
         }
-        writeln!(out, "")?;
-
-        type_info.ReleaseTypeAttr(type_attr);
     }
+    writeln!(out, "    }};")?;
+    Ok(())
+}
+
+fn print_alias_body<W>(
+    type_info: &ITypeInfo,
+    type_attr: &TYPEATTR,
+    name: &str,
+    out: &mut W,
+) -> Result<(), Error>
+where
+    W: std::io::Write,
+{
+    let alias_type_name = unsafe { type_desc_to_string(type_info, &type_attr.tdescAlias) };
+    let mut attributes = Vec::new();
+
+    if (type_attr.wTypeFlags & TYPEFLAG_FHIDDEN.0 as u16) == 0 {
+        attributes.push("public");
+    }
+
+    let attr_str = if !attributes.is_empty() {
+        format!("[{}] ", attributes.join(", "))
+    } else {
+        String::new()
+    };
+
+    writeln!(out, "    typedef {}{} {};", attr_str, alias_type_name, name)?;
+    Ok(())
+}
+
+fn print_record_body<W>(
+    type_info: &ITypeInfo,
+    type_attr: &TYPEATTR,
+    name: &str,
+    out: &mut W,
+) -> Result<(), Error>
+where
+    W: std::io::Write,
+{
+    writeln!(out, "    typedef struct tag{} {{", name)?;
+    for i in 0..type_attr.cVars {
+        if let Ok(var_desc) = SafeVarDesc::new(type_info, i as u32) {
+            print_record_member(type_info, &var_desc, out)?;
+        }
+    }
+    writeln!(out, "    }} {};", name)?;
+    Ok(())
+}
+
+fn print_module_body<W>(
+    type_info: &ITypeInfo,
+    type_attr: &TYPEATTR,
+    name: &str,
+    out: &mut W,
+) -> Result<(), Error>
+where
+    W: std::io::Write,
+{
+    let mut dll_name = String::new();
+    if type_attr.cFuncs > 0 {
+        if let Ok(func_desc) = SafeFuncDesc::new(type_info, 0) {
+            if let Ok(dll) = unsafe { get_dll_entry(type_info, func_desc.memid, func_desc.invkind) }
+            {
+                dll_name = dll;
+            }
+        }
+    }
+
+    let mut attributes = Vec::new();
+    if !dll_name.is_empty() {
+        attributes.push(format!("dllname(\"{}\")", dll_name));
+    }
+
+    // UUID and helpstring are already printed in print_interface_header if they exist,
+    // but wait, print_interface_header does NOT print for MODULE in the original code?
+    // Original code checked for INTERFACE, DISPATCH, COCLASS, ENUM.
+    // So for MODULE we need to print attributes here manually as in original.
+
+    attributes.push(format!("uuid({:?})", type_attr.guid));
+
+    let (_, doc_string) = unsafe { get_type_documentation(type_info, -1) };
+
+    if !doc_string.is_empty() {
+        attributes.push(format!("helpstring(\"{}\")", doc_string));
+    }
+
+    writeln!(out, "    [")?;
+    for (i, attr) in attributes.iter().enumerate() {
+        let suffix = if i == attributes.len() - 1 { "" } else { "," };
+        writeln!(out, "      {}{}", attr, suffix)?;
+    }
+    writeln!(out, "    ]")?;
+    writeln!(out, "    module {} {{", name)?;
+
+    for i in 0..type_attr.cVars {
+        if let Ok(var_desc) = SafeVarDesc::new(type_info, i as u32) {
+            unsafe {
+                print_module_const(type_info, &var_desc, out)?;
+            }
+        }
+    }
+
+    writeln!(out, "    }};")?;
     Ok(())
 }
 
@@ -761,9 +937,16 @@ where
 
     if let Some(val) = unsafe { var_desc.Anonymous.lpvarValue.as_ref() } {
         // Assuming int/long for now as per Olewoo example
-        let val_int = unsafe { val.Anonymous.Anonymous.Anonymous.lVal };
-        // Handle negative hex printing if needed, but simple print for now
-        writeln!(out, "        const int {} = {};", name, val_int)?;
+        // Should really be variant_to_string but formatted for const
+        let val_str = unsafe { variant_to_string(val) };
+        // Note: variant_to_string might quote strings, which is good or bad?
+        // for const int it should be a number.
+        // Original: let val_int = unsafe { val.Anonymous.Anonymous.Anonymous.lVal };
+        // writeln!(out, "        const int {} = {};", name, val_int)?;
+
+        // We should try to respect the type in var_desc
+        let type_name = unsafe { type_desc_to_string(type_info, &var_desc.elemdescVar.tdesc) };
+        writeln!(out, "        const {} {} = {};", type_name, name, val_str)?;
     }
     Ok(())
 }
@@ -827,11 +1010,7 @@ unsafe fn get_custom_data(type_info2: &ITypeInfo2) -> Result<Vec<String>, Error>
     Ok(attrs)
 }
 
-unsafe fn print_function<W>(
-    type_info: &ITypeInfo,
-    func_desc: &FUNCDESC,
-    out: &mut W,
-) -> Result<(), Error>
+fn print_function<W>(type_info: &ITypeInfo, func_desc: &FUNCDESC, out: &mut W) -> Result<(), Error>
 where
     W: std::io::Write,
 {
@@ -961,7 +1140,7 @@ where
     Ok(())
 }
 
-unsafe fn print_var<W>(type_info: &ITypeInfo, var_desc: &VARDESC, out: &mut W) -> Result<(), Error>
+fn print_var<W>(type_info: &ITypeInfo, var_desc: &VARDESC, out: &mut W) -> Result<(), Error>
 where
     W: std::io::Write,
 {
@@ -979,7 +1158,7 @@ where
     Ok(())
 }
 
-unsafe fn print_record_member<W>(
+fn print_record_member<W>(
     type_info: &ITypeInfo,
     var_desc: &VARDESC,
     out: &mut W,
@@ -1046,18 +1225,14 @@ unsafe fn type_desc_to_string(type_info: &ITypeInfo, tdesc: &TYPEDESC) -> String
             if let Ok(ref_type_info) = unsafe { type_info.GetRefTypeInfo(tdesc.Anonymous.hreftype) }
             {
                 let name = unsafe { get_name(&ref_type_info) };
-                unsafe {
-                    if let Ok(type_attr) = ref_type_info.GetTypeAttr() {
-                        let kind = (*type_attr).typekind;
-                        ref_type_info.ReleaseTypeAttr(type_attr);
-                        if kind == TKIND_ENUM {
-                            format!("enum {}", name)
-                        } else {
-                            name
-                        }
+                if let Ok(ref_attr) = SafeTypeAttr::new(&ref_type_info) {
+                    if ref_attr.typekind == TKIND_ENUM {
+                        format!("enum {}", name)
                     } else {
                         name
                     }
+                } else {
+                    name
                 }
             } else {
                 "UnknownUserDefined".to_string()
@@ -1094,6 +1269,9 @@ unsafe fn variant_to_string(variant: &VARIANT) -> String {
             }
             VT_EMPTY => "".to_string(),
             VT_NULL => "null".to_string(),
+            // Added basic support for VT_UI1 (unsigned char / byte) often used in constants
+            VT_UI1 => variant.Anonymous.Anonymous.Anonymous.bVal.to_string(),
+            VT_I1 => variant.Anonymous.Anonymous.Anonymous.cVal.to_string(), // char
             _ => format!("/* vt: {} */", variant.Anonymous.Anonymous.vt.0),
         }
     }
