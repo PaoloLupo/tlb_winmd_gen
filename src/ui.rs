@@ -77,6 +77,7 @@ struct App {
     global_search_results: Vec<usize>, // Indices into all_search_items
     global_search_state: ListState,
     global_search_scroll_state: ScrollbarState, // Scrollbar for Global Search
+    show_exit_confirmation: bool,
 }
 
 impl App {
@@ -147,6 +148,7 @@ impl App {
             idl_scroll_state: ScrollbarState::default(),
             current_methods: Vec::new(),
             current_enums: Vec::new(),
+
             search_query: String::new(),
             member_search_query: String::new(),
             view_mode: ViewMode::Structured,
@@ -164,6 +166,7 @@ impl App {
             global_search_results: Vec::new(),
             global_search_state: ListState::default(),
             global_search_scroll_state: ScrollbarState::default(),
+            show_exit_confirmation: false,
         };
         app.update_filter();
         Ok(app)
@@ -494,7 +497,15 @@ impl App {
             return false;
         }
 
-        if self.show_global_search {
+        if self.show_exit_confirmation {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => return true,
+                KeyCode::Char('n') | KeyCode::Esc => {
+                    self.show_exit_confirmation = false;
+                }
+                _ => {}
+            }
+        } else if self.show_global_search {
             match key.code {
                 KeyCode::Esc => self.show_global_search = false,
                 KeyCode::Down => self.next_global_result(),
@@ -515,9 +526,9 @@ impl App {
                 KeyCode::Char('q')
                     if self.search_query.is_empty() && self.member_search_query.is_empty() =>
                 {
-                    return true;
+                    self.show_exit_confirmation = true;
                 }
-                KeyCode::Esc => return true,
+                KeyCode::Esc => self.show_exit_confirmation = true,
                 KeyCode::Down => self.next(),
                 KeyCode::Up => self.previous(),
                 KeyCode::Right => match self.focus {
@@ -649,6 +660,10 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
 
     if app.show_global_search {
         render_global_search_popup(f, app);
+    }
+
+    if app.show_exit_confirmation {
+        render_exit_confirmation(f);
     }
 }
 
@@ -1137,4 +1152,53 @@ fn render_global_search_popup(f: &mut ratatui::Frame, app: &mut App) {
         chunks[1],
         &mut app.global_search_scroll_state,
     );
+}
+
+fn render_exit_confirmation(f: &mut ratatui::Frame) {
+    let area = centered_rect(60, 20, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title("Exit Confirmation")
+        .borders(Borders::ALL)
+        .style(Style::default().bg(Color::Red).fg(Color::White));
+
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+
+    let text = vec![
+        Line::from("Are you sure you want to exit?"),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Y", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" / "),
+            Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(": Confirm"),
+        ]),
+        Line::from(vec![
+            Span::styled("N", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" / "),
+            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(": Cancel"),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(text)
+        .alignment(ratatui::layout::Alignment::Center)
+        .wrap(Wrap { trim: true });
+
+    // Vertically center the text
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            [
+                Constraint::Percentage(25),
+                Constraint::Percentage(50),
+                Constraint::Percentage(25),
+            ]
+            .as_ref(),
+        )
+        .split(inner_area);
+
+    f.render_widget(paragraph, chunks[1]);
 }
