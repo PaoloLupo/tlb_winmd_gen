@@ -9,7 +9,7 @@ use crossterm::{
 };
 use ratatui::{
     Terminal,
-    backend::{Backend, CrosstermBackend},
+    backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -617,7 +617,10 @@ pub fn run(tlb_path: PathBuf, chm_path: Option<String>) -> Result<(), Box<dyn Er
     Ok(())
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
+fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    mut app: App,
+) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
 
