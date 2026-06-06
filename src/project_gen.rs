@@ -10,7 +10,7 @@ pub fn generate_proj(path: &Path, lib_name: &str, winmd_dir: &Path) -> Result<()
 
     let content = format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
-<Project Sdk="Microsoft.Windows.WinmdGenerator/0.65.8-preview">
+<Project Sdk="Microsoft.Windows.WinmdGenerator/0.70.11-preview">
   <PropertyGroup Label="Globals">
     <OutputWinmd>{}</OutputWinmd>
     <WinmdVersion>255.255.255.255</WinmdVersion>
