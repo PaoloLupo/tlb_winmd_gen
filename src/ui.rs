@@ -3,6 +3,7 @@ use crate::idlgen::{EnumItemInfo, MethodInfo, TypeLibInfo};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -12,7 +13,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{
         Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Scrollbar,
         ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
@@ -78,6 +79,7 @@ struct App {
     global_search_state: ListState,
     global_search_scroll_state: ScrollbarState, // Scrollbar for Global Search
     show_exit_confirmation: bool,
+    show_help: bool,
 }
 
 impl App {
@@ -128,10 +130,7 @@ impl App {
         }
 
         let doc_provider = if let Some(path) = chm_path {
-            match ChmDocumentationProvider::new(&path) {
-                Ok(provider) => Some(provider),
-                Err(_e) => None,
-            }
+            ChmDocumentationProvider::new(&path).ok()
         } else {
             None
         };
@@ -167,6 +166,7 @@ impl App {
             global_search_state: ListState::default(),
             global_search_scroll_state: ScrollbarState::default(),
             show_exit_confirmation: false,
+            show_help: false,
         };
         app.update_filter();
         Ok(app)
@@ -363,6 +363,123 @@ impl App {
         }
     }
 
+    fn next_page(&mut self) {
+        let page_size: usize = 10;
+        match self.focus {
+            Focus::TypeList => {
+                let i = match self.list_state.selected() {
+                    Some(i) => {
+                        let next = i.saturating_add(page_size);
+                        if next >= self.filtered_types.len() {
+                            self.filtered_types.len() - 1
+                        } else {
+                            next
+                        }
+                    }
+                    None => 0,
+                };
+                self.list_state.select(Some(i));
+                self.list_scroll_state = self.list_scroll_state.position(i);
+                self.update_selection();
+            }
+            Focus::MethodList => {
+                if !self.current_methods.is_empty() {
+                    let i = match self.method_list_state.selected() {
+                        Some(i) => {
+                            let next = i.saturating_add(page_size);
+                            if next >= self.current_methods.len() {
+                                self.current_methods.len() - 1
+                            } else {
+                                next
+                            }
+                        }
+                        None => 0,
+                    };
+                    self.method_list_state.select(Some(i));
+                    self.method_list_scroll_state = self.method_list_scroll_state.position(i);
+                    self.details_scroll_offset = 0;
+                    self.details_scroll_state = ScrollbarState::default();
+                } else if !self.current_enums.is_empty() {
+                    let i = match self.content_table_state.selected() {
+                        Some(i) => {
+                            let next = i.saturating_add(page_size);
+                            if next >= self.current_enums.len() {
+                                self.current_enums.len() - 1
+                            } else {
+                                next
+                            }
+                        }
+                        None => 0,
+                    };
+                    self.content_table_state.select(Some(i));
+                    self.content_scroll_state = self.content_scroll_state.position(i);
+                }
+            }
+            Focus::Details => {
+                self.details_scroll_offset =
+                    self.details_scroll_offset.saturating_add(page_size as u16);
+                self.details_scroll_state = self
+                    .details_scroll_state
+                    .position(self.details_scroll_offset as usize);
+            }
+            Focus::IdlView => {
+                self.idl_scroll_offset =
+                    self.idl_scroll_offset.saturating_add(page_size as u16);
+                self.idl_scroll_state = self
+                    .idl_scroll_state
+                    .position(self.idl_scroll_offset as usize);
+            }
+        }
+    }
+
+    fn previous_page(&mut self) {
+        let page_size: usize = 10;
+        match self.focus {
+            Focus::TypeList => {
+                let i = match self.list_state.selected() {
+                    Some(i) => i.saturating_sub(page_size),
+                    None => 0,
+                };
+                self.list_state.select(Some(i));
+                self.list_scroll_state = self.list_scroll_state.position(i);
+                self.update_selection();
+            }
+            Focus::MethodList => {
+                if !self.current_methods.is_empty() {
+                    let i = match self.method_list_state.selected() {
+                        Some(i) => i.saturating_sub(page_size),
+                        None => 0,
+                    };
+                    self.method_list_state.select(Some(i));
+                    self.method_list_scroll_state = self.method_list_scroll_state.position(i);
+                    self.details_scroll_offset = 0;
+                    self.details_scroll_state = ScrollbarState::default();
+                } else if !self.current_enums.is_empty() {
+                    let i = match self.content_table_state.selected() {
+                        Some(i) => i.saturating_sub(page_size),
+                        None => 0,
+                    };
+                    self.content_table_state.select(Some(i));
+                    self.content_scroll_state = self.content_scroll_state.position(i);
+                }
+            }
+            Focus::Details => {
+                self.details_scroll_offset =
+                    self.details_scroll_offset.saturating_sub(page_size as u16);
+                self.details_scroll_state = self
+                    .details_scroll_state
+                    .position(self.details_scroll_offset as usize);
+            }
+            Focus::IdlView => {
+                self.idl_scroll_offset =
+                    self.idl_scroll_offset.saturating_sub(page_size as u16);
+                self.idl_scroll_state = self
+                    .idl_scroll_state
+                    .position(self.idl_scroll_offset as usize);
+            }
+        }
+    }
+
     fn toggle_view(&mut self) {
         self.view_mode = match self.view_mode {
             ViewMode::Idl => ViewMode::Structured,
@@ -523,14 +640,28 @@ impl App {
             }
         } else {
             match key.code {
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return true;
+                }
+                KeyCode::Char('?') | KeyCode::F(1) => {
+                    self.show_help = !self.show_help;
+                }
                 KeyCode::Char('q')
                     if self.search_query.is_empty() && self.member_search_query.is_empty() =>
                 {
                     self.show_exit_confirmation = true;
                 }
-                KeyCode::Esc => self.show_exit_confirmation = true,
+                KeyCode::Esc => {
+                    if self.show_help {
+                        self.show_help = false;
+                    } else {
+                        self.show_exit_confirmation = true;
+                    }
+                }
                 KeyCode::Down => self.next(),
                 KeyCode::Up => self.previous(),
+                KeyCode::PageDown => self.next_page(),
+                KeyCode::PageUp => self.previous_page(),
                 KeyCode::Right => match self.focus {
                     Focus::TypeList => {
                         if self.view_mode == ViewMode::Idl {
@@ -587,6 +718,44 @@ impl App {
         }
         false
     }
+
+    fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollDown => match self.focus {
+                Focus::TypeList => {
+                    self.next();
+                }
+                Focus::MethodList => {
+                    if !self.current_methods.is_empty() {
+                        self.next();
+                    }
+                }
+                Focus::Details => {
+                    self.next();
+                }
+                Focus::IdlView => {
+                    self.next();
+                }
+            },
+            MouseEventKind::ScrollUp => match self.focus {
+                Focus::TypeList => {
+                    self.previous();
+                }
+                Focus::MethodList => {
+                    if !self.current_methods.is_empty() {
+                        self.previous();
+                    }
+                }
+                Focus::Details => {
+                    self.previous();
+                }
+                Focus::IdlView => {
+                    self.previous();
+                }
+            },
+            _ => {}
+        }
+    }
 }
 
 pub fn run(tlb_path: PathBuf, chm_path: Option<String>) -> Result<(), Box<dyn Error>> {
@@ -624,10 +793,16 @@ fn run_app(
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
 
-        if let Event::Key(key) = event::read()? {
-            if app.handle_key_event(key) {
-                return Ok(());
+        match event::read()? {
+            Event::Key(key) => {
+                if app.handle_key_event(key) {
+                    return Ok(());
+                }
             }
+            Event::Mouse(mouse) => {
+                app.handle_mouse_event(mouse);
+            }
+            _ => {}
         }
     }
 }
@@ -667,6 +842,10 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
 
     if app.show_exit_confirmation {
         render_exit_confirmation(f);
+    }
+
+    if app.show_help {
+        render_help_popup(f);
     }
 }
 
@@ -743,6 +922,8 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect) {
         Span::raw("Global Search "),
         Span::styled(" Esc ", Style::default().fg(Color::Cyan)),
         Span::raw("Exit "),
+        Span::styled(" ? ", Style::default().fg(Color::Cyan)),
+        Span::raw("Help "),
     ]);
     let footer = Paragraph::new(footer_text).style(Style::default().bg(Color::DarkGray));
     f.render_widget(footer, area);
@@ -1198,6 +1379,84 @@ fn render_exit_confirmation(f: &mut ratatui::Frame) {
                 Constraint::Percentage(25),
                 Constraint::Percentage(50),
                 Constraint::Percentage(25),
+            ]
+            .as_ref(),
+        )
+        .split(inner_area);
+
+    f.render_widget(paragraph, chunks[1]);
+}
+
+fn render_help_popup(f: &mut ratatui::Frame) {
+    let area = centered_rect(55, 60, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title("Help - Keyboard Shortcuts")
+        .borders(Borders::ALL)
+        .style(Style::default().bg(Color::Black).fg(Color::White));
+
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+
+    let shortcuts = vec![
+        Line::from(vec![
+            Span::styled(" ↑/↓ ", Style::default().fg(Color::Cyan)),
+            Span::raw("Navigate items"),
+        ]),
+        Line::from(vec![
+            Span::styled(" PgUp/PgDn ", Style::default().fg(Color::Cyan)),
+            Span::raw("Jump 10 items"),
+        ]),
+        Line::from(vec![
+            Span::styled(" ←/→ ", Style::default().fg(Color::Cyan)),
+            Span::raw("Change focus panel"),
+        ]),
+        Line::from(vec![
+            Span::styled(" Tab/V ", Style::default().fg(Color::Cyan)),
+            Span::raw("Toggle IDL/Structured view"),
+        ]),
+        Line::from(vec![
+            Span::styled(" / ", Style::default().fg(Color::Cyan)),
+            Span::raw("Type search in current target"),
+        ]),
+        Line::from(vec![
+            Span::styled(" Ctrl+F ", Style::default().fg(Color::Cyan)),
+            Span::raw("Toggle search target (Types/Members)"),
+        ]),
+        Line::from(vec![
+            Span::styled(" Ctrl+P ", Style::default().fg(Color::Cyan)),
+            Span::raw("Open global search"),
+        ]),
+        Line::from(vec![
+            Span::styled(" Ctrl+C ", Style::default().fg(Color::Cyan)),
+            Span::raw("Exit immediately"),
+        ]),
+        Line::from(vec![
+            Span::styled(" Esc ", Style::default().fg(Color::Cyan)),
+            Span::raw("Exit confirmation / Close popup"),
+        ]),
+        Line::from(vec![
+            Span::styled(" q ", Style::default().fg(Color::Cyan)),
+            Span::raw("Exit confirmation (when search is empty)"),
+        ]),
+        Line::from(vec![
+            Span::styled(" ? / F1 ", Style::default().fg(Color::Cyan)),
+            Span::raw("Toggle this help screen"),
+        ]),
+    ];
+
+    let text = Text::from(shortcuts);
+    let paragraph = Paragraph::new(text)
+        .alignment(ratatui::layout::Alignment::Left);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            [
+                Constraint::Percentage(15),
+                Constraint::Percentage(70),
+                Constraint::Percentage(15),
             ]
             .as_ref(),
         )
