@@ -20,6 +20,6 @@ chmlib = {path = "crates/chmlib/chmlib"}
 bitflags = "2.13.0"
 tempfile = "3.27.0"
 
-[features]
-default = []
-standalone = []
+[[bin]]
+name = "etabs_viewer"
+path = "src/bin/etabs_viewer.rs"
