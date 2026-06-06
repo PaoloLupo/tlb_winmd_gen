@@ -44,8 +44,11 @@ pub fn generate_main_cpp(path: &Path, lib_name: &str) -> Result<(), error::Error
     Ok(())
 }
 
-pub fn check_dotnet() -> bool {
-    Command::new("dotnet").arg("--version").output().is_ok()
+pub fn check_dotnet() -> Result<(), error::Error> {
+    if Command::new("dotnet").arg("--version").output().is_err() {
+        return Err(error::Error::DotnetNotFound);
+    }
+    Ok(())
 }
 
 pub fn run_dotnet_build(proj_dir: &Path) -> Result<(), error::Error> {
@@ -56,11 +59,9 @@ pub fn run_dotnet_build(proj_dir: &Path) -> Result<(), error::Error> {
         .status()?;
 
     if !status.success() {
-        // Return a generic IO error for build failure, as we don't have a specific error variant for it yet
-        return Err(error::Error::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "dotnet build failed",
-        )));
+        return Err(error::Error::BuildFailed(
+            status.code().unwrap_or(-1),
+        ));
     }
     Ok(())
 }
