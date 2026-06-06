@@ -19,3 +19,8 @@ windows-core = "0.62.2"
 chmlib = {path = "crates/chmlib/chmlib"}
 textwrap = "0.16.2"
 bitflags = "2.10.0"
+tempfile = "3.13.0"
+
+[features]
+default = []
+standalone = []
