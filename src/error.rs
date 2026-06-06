@@ -8,4 +8,8 @@ pub enum Error {
     TypeLibNotLoaded,
     #[error("IO Error")]
     IoError(#[from] std::io::Error),
+    #[error("dotnet not found. Please install .NET SDK.")]
+    DotnetNotFound,
+    #[error("dotnet build failed with exit code {0}")]
+    BuildFailed(i32),
 }
