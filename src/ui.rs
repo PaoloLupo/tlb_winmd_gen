@@ -98,6 +98,10 @@ struct App {
     global_search_scroll_state: ScrollbarState, // Scrollbar for Global Search
     show_exit_confirmation: bool,
     show_help: bool,
+    type_list_area: Rect,
+    method_list_area: Rect,
+    details_area: Rect,
+    right_area: Rect,
 }
 
 impl App {
@@ -185,6 +189,10 @@ impl App {
             global_search_scroll_state: ScrollbarState::default(),
             show_exit_confirmation: false,
             show_help: false,
+            type_list_area: Rect { x: 0, y: 0, width: 0, height: 0 },
+            method_list_area: Rect { x: 0, y: 0, width: 0, height: 0 },
+            details_area: Rect { x: 0, y: 0, width: 0, height: 0 },
+            right_area: Rect { x: 0, y: 0, width: 0, height: 0 },
         };
         app.update_filter();
         Ok(app)
@@ -580,9 +588,8 @@ impl App {
                     };
 
                 self.show_global_search = false;
-                self.search_query.clear();
-                self.update_filter();
 
+                // Navigate to the type in the current filtered list without clearing queries
                 if let Some(pos) = self
                     .filtered_types
                     .iter()
@@ -592,12 +599,8 @@ impl App {
                     self.update_selection();
                 }
 
-                // If it's a method or enum value, select it in the content table
+                // If it's a method or enum value, select it without modifying member_search_query
                 if kind == "Method" || kind == "EnumValue" {
-                    self.member_search_query = member_name.clone();
-                    self.search_target = SearchTarget::Members; // Switch focus to member search so user can see/clear it
-
-                    // Need to find the index of the member in the current list
                     let member_query = member_name.to_lowercase();
                     if !self.current_methods.is_empty() {
                         if let Some(pos) = self
@@ -606,6 +609,9 @@ impl App {
                             .position(|m| m.name.to_lowercase() == member_query)
                         {
                             self.method_list_state.select(Some(pos));
+                            self.details_scroll_offset = 0;
+                            self.details_scroll_state = ScrollbarState::default();
+                            self.focus = Focus::MethodList;
                         }
                     } else if !self.current_enums.is_empty() {
                         if let Some(pos) = self
@@ -614,14 +620,11 @@ impl App {
                             .position(|e| e.name.to_lowercase() == member_query)
                         {
                             self.content_table_state.select(Some(pos));
+                            self.focus = Focus::MethodList;
                         }
                     }
                 } else {
-                    // It's a type (Interface, Enum, Dispatch, etc.)
-                    // We already selected the type in the left panel.
-                    // Just ensure we are focusing on the type list and clear member search
-                    self.member_search_query.clear();
-                    self.search_target = SearchTarget::Types;
+                    // It's a type — stay in TypeList focus
                     self.focus = Focus::TypeList;
                 }
             }
@@ -737,8 +740,79 @@ impl App {
         false
     }
 
+    fn is_in_area(area: Rect, row: u16, col: u16) -> bool {
+        row >= area.y
+            && row < area.y + area.height
+            && col >= area.x
+            && col < area.x + area.width
+    }
+
     fn handle_mouse_event(&mut self, mouse: MouseEvent) {
         match mouse.kind {
+            MouseEventKind::Down(_) => {
+                let row = mouse.row as u16;
+                let col = mouse.column as u16;
+
+                // ── Type list (always visible) ─────────────────────────
+                if Self::is_in_area(self.type_list_area, row, col) {
+                    let inner_y = self.type_list_area.y + 1; // skip top border
+                    if row >= inner_y {
+                        let index = (row - inner_y) as usize;
+                        if index < self.filtered_types.len() {
+                            self.list_state.select(Some(index));
+                            self.update_selection();
+                            self.focus = Focus::TypeList;
+                            return;
+                        }
+                    }
+                }
+
+                // ── Right area (70% width) ────────────────────────────
+                if Self::is_in_area(self.right_area, row, col) {
+                    match self.view_mode {
+                        ViewMode::Structured => {
+                            if !self.current_methods.is_empty() {
+                                // Method list (left 40% of right area)
+                                if Self::is_in_area(self.method_list_area, row, col) {
+                                    let inner_y = self.method_list_area.y + 1;
+                                    if row >= inner_y {
+                                        let index = (row - inner_y) as usize;
+                                        if index < self.current_methods.len() {
+                                            self.method_list_state.select(Some(index));
+                                            self.details_scroll_offset = 0;
+                                            self.details_scroll_state = ScrollbarState::default();
+                                            self.focus = Focus::MethodList;
+                                            return;
+                                        }
+                                    }
+                                }
+                                // Details panel (right 60%) — just focus
+                                if Self::is_in_area(self.details_area, row, col) {
+                                    self.focus = Focus::Details;
+                                    return;
+                                }
+                            } else if !self.current_enums.is_empty() {
+                                let inner_y = self.right_area.y + 1;
+                                if row >= inner_y {
+                                    let index = (row - inner_y) as usize;
+                                    if index < self.current_enums.len() {
+                                        self.content_table_state.select(Some(index));
+                                        self.focus = Focus::MethodList;
+                                        return;
+                                    }
+                                }
+                            }
+                            // No methods/enums → just focus the right area as IDL preview
+                            self.focus = Focus::IdlView;
+                            return;
+                        }
+                        ViewMode::Idl => {
+                            self.focus = Focus::IdlView;
+                            return;
+                        }
+                    }
+                }
+            }
             MouseEventKind::ScrollDown => match self.focus {
                 Focus::TypeList => {
                     self.next();
@@ -848,12 +922,20 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)].as_ref())
         .split(main_chunks[2]);
 
+    app.type_list_area = content_chunks[0];
     render_type_list(f, app, content_chunks[0]);
 
     let right_area = content_chunks[1];
+    app.right_area = right_area;
+    let method_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)].as_ref())
+        .split(right_area);
+    app.method_list_area = method_layout[0];
+    app.details_area = method_layout[1];
     match app.view_mode {
         ViewMode::Idl => render_idl_view(f, app, right_area),
-        ViewMode::Structured => render_structured_view(f, app, right_area),
+        ViewMode::Structured => render_structured_view(f, app, right_area, &method_layout),
     }
 
     if app.show_global_search {
@@ -1203,14 +1285,10 @@ fn render_idl_view(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     );
 }
 
-fn render_structured_view(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+fn render_structured_view(f: &mut ratatui::Frame, app: &mut App, area: Rect, method_chunks: &[Rect]) {
     if !app.current_methods.is_empty() {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)].as_ref())
-            .split(area);
-        render_method_list(f, app, chunks[0]);
-        render_details(f, app, chunks[1]);
+        render_method_list(f, app, method_chunks[0]);
+        render_details(f, app, method_chunks[1]);
     } else if !app.current_enums.is_empty() {
         render_enum_table(f, app, area);
     } else {
