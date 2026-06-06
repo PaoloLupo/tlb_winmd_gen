@@ -15,11 +15,29 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{
-        Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
+        Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row,
+        Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
     },
 };
 use std::{error::Error, io, path::PathBuf};
+
+// ─── Color palette ───────────────────────────────────────────────────────────
+const BG_PRIMARY: Color = Color::Indexed(235);
+
+const FG_PRIMARY: Color = Color::Indexed(252);
+const FG_SECONDARY: Color = Color::Indexed(248);
+const FG_DIM: Color = Color::Indexed(242);
+const ACCENT_CYAN: Color = Color::Indexed(44);
+const ACCENT_YELLOW: Color = Color::Indexed(186);
+const ACCENT_MAGENTA: Color = Color::Indexed(141);
+const ACCENT_GREEN: Color = Color::Indexed(114);
+const ACCENT_RED: Color = Color::Indexed(203);
+const ACCENT_BLUE: Color = Color::Indexed(75);
+const BORDER_FOCUSED: Color = Color::Indexed(75);
+const BORDER_UNFOCUSED: Color = Color::Indexed(240);
+const SELECTION_BG: Color = Color::Indexed(24);
+const TITLE_BAR_BG: Color = Color::Indexed(236);
+const FOOTER_BG: Color = Color::Indexed(236);
 
 #[derive(PartialEq)]
 enum ViewMode {
@@ -812,21 +830,23 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints(
             [
+                Constraint::Length(1),
                 Constraint::Length(3),
                 Constraint::Min(0),
-                Constraint::Length(1),
+                Constraint::Length(2),
             ]
             .as_ref(),
         )
         .split(f.area());
 
-    render_search_bar(f, app, main_chunks[0]);
-    render_footer(f, main_chunks[2]);
+    render_title_bar(f, app, main_chunks[0]);
+    render_search_bar(f, app, main_chunks[1]);
+    render_footer(f, main_chunks[3]);
 
     let content_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)].as_ref())
-        .split(main_chunks[1]);
+        .split(main_chunks[2]);
 
     render_type_list(f, app, content_chunks[0]);
 
@@ -875,87 +895,138 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+fn render_title_bar(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let focus_label = match app.focus {
+        Focus::TypeList => "Type List",
+        Focus::MethodList => "Methods",
+        Focus::Details => "Details",
+        Focus::IdlView => "IDL View",
+    };
+    let view_label = match app.view_mode {
+        ViewMode::Idl => "IDL",
+        ViewMode::Structured => "Structured",
+    };
+    let title = Line::from(vec![
+        Span::styled(
+            " TLB→WinMD ",
+            Style::default()
+                .fg(ACCENT_CYAN)
+                .bg(TITLE_BAR_BG)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("│", Style::default().fg(FG_DIM).bg(TITLE_BAR_BG)),
+        Span::styled(
+            format!(" {} types ", app.types.len()),
+            Style::default().fg(FG_SECONDARY).bg(TITLE_BAR_BG),
+        ),
+        Span::styled("│", Style::default().fg(FG_DIM).bg(TITLE_BAR_BG)),
+        Span::styled(
+            format!(" {}", view_label),
+            Style::default().fg(ACCENT_YELLOW).bg(TITLE_BAR_BG),
+        ),
+        Span::styled(" | ", Style::default().fg(FG_DIM).bg(TITLE_BAR_BG)),
+        Span::styled(
+            focus_label,
+            Style::default().fg(FG_PRIMARY).bg(TITLE_BAR_BG),
+        ),
+    ]);
+    let bar = Paragraph::new(title).style(Style::default().bg(TITLE_BAR_BG));
+    f.render_widget(bar, area);
+}
+
 fn render_search_bar(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let search_title = match app.search_target {
-        SearchTarget::Types => "Search Types (Ctrl+F to switch, Ctrl+P for Global Search)",
-        SearchTarget::Members => "Search Members (Ctrl+F to switch, Ctrl+P for Global Search)",
+        SearchTarget::Types => " Search Types (Ctrl+F to switch, Ctrl+P for Global Search) ",
+        SearchTarget::Members => " Search Members (Ctrl+F to switch, Ctrl+P for Global Search) ",
     };
     let search_text = match app.search_target {
         SearchTarget::Types => &app.search_query,
         SearchTarget::Members => &app.member_search_query,
     };
     let search_color = match app.search_target {
-        SearchTarget::Types => Color::White,
-        SearchTarget::Members => Color::Cyan,
+        SearchTarget::Types => FG_PRIMARY,
+        SearchTarget::Members => ACCENT_CYAN,
     };
 
     let search_paragraph = Paragraph::new(search_text.as_str())
-        .block(Block::default().borders(Borders::ALL).title(search_title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(ACCENT_YELLOW))
+                .title(search_title)
+                .title_style(Style::default().fg(FG_SECONDARY)),
+        )
         .style(Style::default().fg(search_color));
     f.render_widget(search_paragraph, area);
 }
 
 fn render_footer(f: &mut ratatui::Frame, area: Rect) {
-    let footer_text = Line::from(vec![
-        Span::styled(
-            " Legend: ",
-            Style::default().bg(Color::White).fg(Color::Black),
-        ),
-        Span::styled(" ↓ ", Style::default().fg(Color::Green)),
-        Span::raw("In "),
-        Span::styled("↑ ", Style::default().fg(Color::Red)),
-        Span::raw("Out "),
-        Span::styled("? ", Style::default().fg(Color::Yellow)),
-        Span::raw("Optional "),
-        Span::styled("= ", Style::default().fg(Color::Blue)),
-        Span::raw("Default "),
-        Span::styled(" | ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            " Keys: ",
-            Style::default().bg(Color::White).fg(Color::Black),
-        ),
-        Span::styled(" Tab/V ", Style::default().fg(Color::Cyan)),
-        Span::raw("Toggle View "),
-        Span::styled(" Ctrl+F ", Style::default().fg(Color::Cyan)),
-        Span::raw("Switch Search "),
-        Span::styled(" Ctrl+P ", Style::default().fg(Color::Cyan)),
-        Span::raw("Global Search "),
-        Span::styled(" Esc ", Style::default().fg(Color::Cyan)),
-        Span::raw("Exit "),
-        Span::styled(" ? ", Style::default().fg(Color::Cyan)),
-        Span::raw("Help "),
+    let legend_line = Line::from(vec![
+        Span::styled(" Legend ", Style::default().fg(FG_PRIMARY).bg(FG_DIM)),
+        Span::styled(" ↓ ", Style::default().fg(ACCENT_GREEN)),
+        Span::styled("In", Style::default().fg(FG_SECONDARY)),
+        Span::styled(" ↑ ", Style::default().fg(ACCENT_RED)),
+        Span::styled("Out", Style::default().fg(FG_SECONDARY)),
+        Span::styled(" ? ", Style::default().fg(ACCENT_YELLOW)),
+        Span::styled("Optional", Style::default().fg(FG_SECONDARY)),
+        Span::styled(" = ", Style::default().fg(ACCENT_BLUE)),
+        Span::styled("Default", Style::default().fg(FG_SECONDARY)),
     ]);
-    let footer = Paragraph::new(footer_text).style(Style::default().bg(Color::DarkGray));
+    let keys_line = Line::from(vec![
+        Span::styled(" Keys ", Style::default().fg(FG_PRIMARY).bg(FG_DIM)),
+        Span::styled(" Tab/V ", Style::default().fg(ACCENT_CYAN)),
+        Span::styled("View", Style::default().fg(FG_SECONDARY)),
+        Span::styled(" Ctrl+F ", Style::default().fg(ACCENT_CYAN)),
+        Span::styled("Search", Style::default().fg(FG_SECONDARY)),
+        Span::styled(" Ctrl+P ", Style::default().fg(ACCENT_CYAN)),
+        Span::styled("Global", Style::default().fg(FG_SECONDARY)),
+        Span::styled(" Esc/q ", Style::default().fg(ACCENT_CYAN)),
+        Span::styled("Exit", Style::default().fg(FG_SECONDARY)),
+        Span::styled(" ? ", Style::default().fg(ACCENT_CYAN)),
+        Span::styled("Help", Style::default().fg(FG_SECONDARY)),
+        Span::styled(" PgUp/PgDn ", Style::default().fg(ACCENT_CYAN)),
+        Span::styled("Page", Style::default().fg(FG_SECONDARY)),
+    ]);
+    let footer = Paragraph::new(Text::from(vec![legend_line, keys_line]))
+        .style(Style::default().bg(FOOTER_BG).fg(FG_DIM));
     f.render_widget(footer, area);
 }
 
 fn render_type_list(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let is_focused = app.focus == Focus::TypeList;
+    let border_style = if is_focused {
+        Style::default().fg(BORDER_FOCUSED)
+    } else {
+        Style::default().fg(BORDER_UNFOCUSED)
+    };
+    let fg_text = if is_focused { FG_PRIMARY } else { FG_DIM };
+
     let items: Vec<ListItem> = app
         .filtered_types
         .iter()
         .map(|(_, name, kind)| {
             let content = Line::from(vec![
-                Span::styled(format!("{:<10}", kind), Style::default().fg(Color::Yellow)),
-                Span::raw(name),
+                Span::styled(
+                    format!("{:<10}", kind),
+                    Style::default().fg(if is_focused { ACCENT_YELLOW } else { FG_DIM }),
+                ),
+                Span::styled(name, Style::default().fg(fg_text)),
             ]);
             ListItem::new(content)
         })
         .collect();
 
-    let type_list_border_style = if app.focus == Focus::TypeList {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default()
-    };
-
     let list = List::new(items)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(type_list_border_style)
-                .title("Types"),
+                .border_type(BorderType::Rounded)
+                .border_style(border_style)
+                .title(" Types ")
+                .title_style(Style::default().fg(if is_focused { FG_PRIMARY } else { FG_DIM })),
         )
-        .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+        .highlight_style(Style::default().bg(SELECTION_BG).fg(FG_PRIMARY));
 
     f.render_stateful_widget(list, area, &mut app.list_state);
 
@@ -963,25 +1034,153 @@ fn render_type_list(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
-            .end_symbol(Some("↓")),
+            .end_symbol(Some("↓"))
+            .style(Style::default().fg(if is_focused { BORDER_FOCUSED } else { BORDER_UNFOCUSED })),
         area,
         &mut app.list_scroll_state,
     );
 }
 
+fn highlight_idl(text: &str) -> Text<'static> {
+    let keywords = [
+        "library", "interface", "coclass", "enum", "dispinterface", "module", "typedef",
+        "importlib", "import", "HRESULT", "void", "struct", "union",
+    ];
+    let known_types = [
+        "BSTR", "VARIANT_BOOL", "VARIANT", "SAFEARRAY", "GUID", "IUnknown", "IDispatch",
+        "oleautomation", "dual", "nonextensible",
+    ];
+    let lines: Vec<Line> = text
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            let indent = &line[..line.len() - trimmed.len()];
+            let mut spans = Vec::new();
+            if !indent.is_empty() {
+                spans.push(Span::styled(indent.to_string(), Style::default().fg(FG_DIM)));
+            }
+
+            if trimmed.starts_with("//") {
+                spans.push(Span::styled(
+                    trimmed.to_string(),
+                    Style::default().fg(FG_DIM).add_modifier(Modifier::ITALIC),
+                ));
+                return Line::from(spans);
+            }
+
+            let mut rest = trimmed;
+            while !rest.is_empty() {
+                // GUIDs
+                if let Some(start) = rest.find('{') {
+                    if let Some(end) = rest[start..].find('}') {
+                        let end = start + end;
+                        if start > 0 {
+                            spans.push(Span::styled(
+                                rest[..start].to_string(),
+                                Style::default().fg(FG_PRIMARY),
+                            ));
+                        }
+                        spans.push(Span::styled(
+                            rest[start..=end].to_string(),
+                            Style::default().fg(ACCENT_GREEN),
+                        ));
+                        rest = &rest[end + 1..];
+                        continue;
+                    }
+                }
+                // Strings
+                if let Some(q) = rest.find('"') {
+                    if q > 0 {
+                        spans.push(Span::styled(
+                            rest[..q].to_string(),
+                            Style::default().fg(FG_PRIMARY),
+                        ));
+                    }
+                    let end = rest[q + 1..].find('"').map(|e| q + 1 + e + 1).unwrap_or(rest.len());
+                    spans.push(Span::styled(
+                        rest[q..end].to_string(),
+                        Style::default().fg(ACCENT_GREEN),
+                    ));
+                    rest = &rest[end..];
+                    continue;
+                }
+                // Comments
+                if let Some(c) = rest.find("//") {
+                    if c > 0 {
+                        spans.push(Span::styled(
+                            rest[..c].to_string(),
+                            Style::default().fg(FG_PRIMARY),
+                        ));
+                    }
+                    spans.push(Span::styled(
+                        rest[c..].to_string(),
+                        Style::default().fg(FG_DIM).add_modifier(Modifier::ITALIC),
+                    ));
+                    rest = "";
+                    continue;
+                }
+                // Numbers
+                let rest_clone = rest;
+                let word_end = rest_clone
+                    .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
+                    .unwrap_or(rest_clone.len());
+                if word_end > 0 {
+                    let word = &rest[..word_end];
+                    if word.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                        spans.push(Span::styled(
+                            word.to_string(),
+                            Style::default().fg(ACCENT_YELLOW),
+                        ));
+                    } else if keywords.contains(&word) || (word.to_lowercase() == word && keywords.contains(&&word.to_lowercase().as_str())) {
+                        spans.push(Span::styled(
+                            word.to_string(),
+                            Style::default()
+                                .fg(ACCENT_MAGENTA)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                    } else if known_types.contains(&word) {
+                        spans.push(Span::styled(
+                            word.to_string(),
+                            Style::default().fg(ACCENT_CYAN),
+                        ));
+                    } else {
+                        spans.push(Span::styled(
+                            word.to_string(),
+                            Style::default().fg(FG_PRIMARY),
+                        ));
+                    }
+                    rest = &rest[word_end..];
+                } else {
+                    spans.push(Span::styled(
+                        rest[..1].to_string(),
+                        Style::default().fg(FG_PRIMARY),
+                    ));
+                    rest = &rest[1..];
+                }
+            }
+            Line::from(spans)
+        })
+        .collect();
+    Text::from(lines)
+}
+
 fn render_idl_view(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let idl_border_style = if app.focus == Focus::IdlView {
-        Style::default().fg(Color::Yellow)
+    let is_focused = app.focus == Focus::IdlView;
+    let border_style = if is_focused {
+        Style::default().fg(BORDER_FOCUSED)
     } else {
-        Style::default()
+        Style::default().fg(BORDER_UNFOCUSED)
     };
 
-    let idl_paragraph = Paragraph::new(app.current_idl.as_str())
+    let idl_text = highlight_idl(&app.current_idl);
+    let idl_paragraph = Paragraph::new(idl_text)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(idl_border_style)
-                .title("IDL Preview"),
+                .border_type(BorderType::Rounded)
+                .border_style(border_style)
+                .title(" IDL Preview ")
+                .title_style(Style::default().fg(if is_focused { FG_PRIMARY } else { FG_DIM })),
         )
         .wrap(Wrap { trim: false })
         .scroll((app.idl_scroll_offset, 0));
@@ -997,7 +1196,8 @@ fn render_idl_view(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
-            .end_symbol(Some("↓")),
+            .end_symbol(Some("↓"))
+            .style(Style::default().fg(if is_focused { BORDER_FOCUSED } else { BORDER_UNFOCUSED })),
         area,
         &mut app.idl_scroll_state,
     );
@@ -1014,11 +1214,15 @@ fn render_structured_view(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     } else if !app.current_enums.is_empty() {
         render_enum_table(f, app, area);
     } else {
-        let p = Paragraph::new(app.current_idl.as_str())
+        let idl_text = highlight_idl(&app.current_idl);
+        let p = Paragraph::new(idl_text)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("IDL Preview (No structured data)"),
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(BORDER_UNFOCUSED))
+                    .title(" IDL Preview (No structured data) ")
+                    .title_style(Style::default().fg(FG_DIM)),
             )
             .wrap(Wrap { trim: false });
         f.render_widget(p, area);
@@ -1026,6 +1230,14 @@ fn render_structured_view(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 }
 
 fn render_method_list(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let is_focused = app.focus == Focus::MethodList;
+    let border_style = if is_focused {
+        Style::default().fg(BORDER_FOCUSED)
+    } else {
+        Style::default().fg(BORDER_UNFOCUSED)
+    };
+    let fg_text = if is_focused { FG_PRIMARY } else { FG_DIM };
+
     let member_query = app.member_search_query.to_lowercase();
     let filtered_methods: Vec<&MethodInfo> = app
         .current_methods
@@ -1037,26 +1249,25 @@ fn render_method_list(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|m| {
             ListItem::new(Line::from(vec![
-                Span::styled("ƒ ", Style::default().fg(Color::Magenta)),
-                Span::raw(&m.name),
+                Span::styled(
+                    "ƒ ",
+                    Style::default().fg(if is_focused { ACCENT_MAGENTA } else { FG_DIM }),
+                ),
+                Span::styled(&m.name, Style::default().fg(fg_text)),
             ]))
         })
         .collect();
-
-    let method_border_style = if app.focus == Focus::MethodList {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default()
-    };
 
     let method_list = List::new(method_items)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(method_border_style)
-                .title("Functions"),
+                .border_type(BorderType::Rounded)
+                .border_style(border_style)
+                .title(" Functions ")
+                .title_style(Style::default().fg(if is_focused { FG_PRIMARY } else { FG_DIM })),
         )
-        .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+        .highlight_style(Style::default().bg(SELECTION_BG).fg(FG_PRIMARY));
 
     f.render_stateful_widget(method_list, area, &mut app.method_list_state);
 
@@ -1070,23 +1281,27 @@ fn render_method_list(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
-            .end_symbol(Some("↓")),
+            .end_symbol(Some("↓"))
+            .style(Style::default().fg(if is_focused { BORDER_FOCUSED } else { BORDER_UNFOCUSED })),
         area,
         &mut app.method_list_scroll_state,
     );
 }
 
 fn render_details(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let details_border_style = if app.focus == Focus::Details {
-        Style::default().fg(Color::Yellow)
+    let is_focused = app.focus == Focus::Details;
+    let border_style = if is_focused {
+        Style::default().fg(BORDER_FOCUSED)
     } else {
-        Style::default()
+        Style::default().fg(BORDER_UNFOCUSED)
     };
 
     let details_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(details_border_style)
-        .title("Details");
+        .border_type(BorderType::Rounded)
+        .border_style(border_style)
+        .title(" Details ")
+        .title_style(Style::default().fg(if is_focused { FG_PRIMARY } else { FG_DIM }));
 
     let inner_details_area = details_block.inner(area);
     f.render_widget(details_block, area);
@@ -1105,52 +1320,63 @@ fn render_details(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 .constraints([Constraint::Min(0)].as_ref())
                 .split(inner_details_area);
 
-            let mut lines = Vec::new();
+            let mut lines: Vec<Line> = Vec::new();
 
-            // Signature
+            // Signature line
             lines.push(Line::from(vec![
-                Span::styled("ƒ ", Style::default().fg(Color::Magenta)),
+                Span::styled("ƒ ", Style::default().fg(ACCENT_MAGENTA)),
                 Span::styled(
                     &method.name,
                     Style::default()
-                        .fg(Color::White)
+                        .fg(FG_PRIMARY)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(" ("),
+                Span::styled(" (", Style::default().fg(FG_SECONDARY)),
             ]));
 
+            // Parameters
             for param in &method.params {
                 let mut param_spans = Vec::new();
-                param_spans.push(Span::raw("    "));
+                param_spans.push(Span::styled("    ", Style::default().fg(FG_DIM)));
                 if param.flags.contains(&"in".to_string()) {
-                    param_spans.push(Span::styled("↓ ", Style::default().fg(Color::Green)));
+                    param_spans.push(Span::styled("↓ ", Style::default().fg(ACCENT_GREEN)));
                 }
                 if param.flags.contains(&"out".to_string()) {
-                    param_spans.push(Span::styled("↑ ", Style::default().fg(Color::Red)));
+                    param_spans.push(Span::styled("↑ ", Style::default().fg(ACCENT_RED)));
                 }
                 if let Some(default_val) = &param.default_value {
                     param_spans.push(Span::styled(
                         format!("= {} ", default_val),
-                        Style::default().fg(Color::Blue),
+                        Style::default().fg(ACCENT_BLUE),
                     ));
                 } else if param.flags.contains(&"defaultvalue".to_string()) {
-                    param_spans.push(Span::styled("* ", Style::default().fg(Color::Blue)));
+                    param_spans.push(Span::styled("* ", Style::default().fg(ACCENT_BLUE)));
                 }
                 if param.flags.contains(&"optional".to_string()) {
-                    param_spans.push(Span::styled("? ", Style::default().fg(Color::Yellow)));
+                    param_spans.push(Span::styled(
+                        "? ",
+                        Style::default().fg(ACCENT_YELLOW),
+                    ));
                 }
                 param_spans.push(Span::styled(
                     format!("{} ", param.type_name),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(if is_focused { FG_PRIMARY } else { FG_DIM }),
                 ));
-                param_spans.push(Span::raw(&param.name));
-                param_spans.push(Span::raw(","));
+                param_spans.push(Span::styled(
+                    &param.name,
+                    Style::default().fg(FG_SECONDARY),
+                ));
+                param_spans.push(Span::styled(",", Style::default().fg(FG_DIM)));
                 lines.push(Line::from(param_spans));
             }
 
+            // Return type
             lines.push(Line::from(vec![
-                Span::raw("  ) -> "),
-                Span::styled(&method.ret_type, Style::default().fg(Color::Green)),
+                Span::styled("  ) → ", Style::default().fg(FG_SECONDARY)),
+                Span::styled(
+                    &method.ret_type,
+                    Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD),
+                ),
             ]));
             lines.push(Line::from(""));
 
@@ -1159,36 +1385,46 @@ fn render_details(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 if let Some(doc) = provider.get_doc(&method.name) {
                     lines.push(Line::from(Span::styled(
                         "Description:",
-                        Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                        Style::default()
+                            .fg(ACCENT_CYAN)
+                            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
                     )));
-                    lines.push(Line::from(doc.description.clone()));
+                    lines.push(Line::from(Span::styled(
+                        doc.description.clone(),
+                        Style::default().fg(FG_SECONDARY),
+                    )));
                     lines.push(Line::from(""));
 
                     if !doc.parameters.is_empty() {
                         lines.push(Line::from(Span::styled(
                             "Parameters:",
-                            Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                            Style::default()
+                                .fg(ACCENT_CYAN)
+                                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
                         )));
                         for param in &doc.parameters {
                             lines.push(Line::from(vec![
                                 Span::styled(
                                     format!("- {}: ", param.name),
-                                    Style::default().fg(Color::Cyan),
+                                    Style::default().fg(ACCENT_YELLOW),
                                 ),
-                                Span::raw(param.description.clone()),
+                                Span::styled(
+                                    param.description.clone(),
+                                    Style::default().fg(FG_SECONDARY),
+                                ),
                             ]));
                         }
                     }
                 } else {
                     lines.push(Line::from(Span::styled(
                         "No documentation found.",
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(FG_DIM),
                     )));
                 }
             } else {
                 lines.push(Line::from(Span::styled(
                     "Documentation provider not available.",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(FG_DIM),
                 )));
             }
 
@@ -1208,7 +1444,8 @@ fn render_details(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 Scrollbar::default()
                     .orientation(ScrollbarOrientation::VerticalRight)
                     .begin_symbol(Some("↑"))
-                    .end_symbol(Some("↓")),
+                    .end_symbol(Some("↓"))
+                    .style(Style::default().fg(if is_focused { BORDER_FOCUSED } else { BORDER_UNFOCUSED })),
                 details_layout[0],
                 &mut app.details_scroll_state,
             );
@@ -1217,12 +1454,19 @@ fn render_details(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 }
 
 fn render_enum_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let is_focused = app.focus == Focus::MethodList;
+    let border_style = if is_focused {
+        Style::default().fg(BORDER_FOCUSED)
+    } else {
+        Style::default().fg(BORDER_UNFOCUSED)
+    };
+
     let member_query = app.member_search_query.to_lowercase();
     let header_cells = ["Name", "Value"]
         .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(Color::White)));
+        .map(|h| Cell::from(*h).style(Style::default().fg(FG_PRIMARY)));
     let header = Row::new(header_cells)
-        .style(Style::default().bg(Color::Blue))
+        .style(Style::default().bg(SELECTION_BG))
         .height(1);
 
     let filtered_enums: Vec<&EnumItemInfo> = app
@@ -1233,16 +1477,16 @@ fn render_enum_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
     let rows = filtered_enums.iter().map(|item| {
         Row::new(vec![
-            Cell::from(Span::styled(&item.name, Style::default().fg(Color::Cyan))),
-            Cell::from(Span::styled(&item.value, Style::default().fg(Color::White))),
+            Cell::from(Span::styled(
+                &item.name,
+                Style::default().fg(if is_focused { ACCENT_CYAN } else { FG_DIM }),
+            )),
+            Cell::from(Span::styled(
+                &item.value,
+                Style::default().fg(if is_focused { FG_PRIMARY } else { FG_DIM }),
+            )),
         ])
     });
-
-    let content_border_style = if app.focus == Focus::MethodList {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default()
-    };
 
     let table = Table::new(
         rows,
@@ -1252,10 +1496,12 @@ fn render_enum_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(content_border_style)
-            .title("Enum Values"),
+            .border_type(BorderType::Rounded)
+            .border_style(border_style)
+            .title(" Enum Values ")
+            .title_style(Style::default().fg(if is_focused { FG_PRIMARY } else { FG_DIM })),
     )
-    .row_highlight_style(Style::default().bg(Color::Blue));
+    .row_highlight_style(Style::default().bg(SELECTION_BG).fg(FG_PRIMARY));
 
     f.render_stateful_widget(table, area, &mut app.content_table_state);
 
@@ -1269,7 +1515,8 @@ fn render_enum_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
-            .end_symbol(Some("↓")),
+            .end_symbol(Some("↓"))
+            .style(Style::default().fg(if is_focused { BORDER_FOCUSED } else { BORDER_UNFOCUSED })),
         area,
         &mut app.content_scroll_state,
     );
@@ -1280,9 +1527,12 @@ fn render_global_search_popup(f: &mut ratatui::Frame, app: &mut App) {
     f.render_widget(Clear, area);
 
     let block = Block::default()
-        .title("Global Search (Esc to close)")
+        .title(" Global Search (Esc to close) ")
+        .title_style(Style::default().fg(ACCENT_CYAN))
         .borders(Borders::ALL)
-        .style(Style::default().bg(Color::Black));
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(BORDER_FOCUSED))
+        .style(Style::default().bg(BG_PRIMARY));
 
     let inner_area = block.inner(area);
     f.render_widget(block, area);
@@ -1293,8 +1543,15 @@ fn render_global_search_popup(f: &mut ratatui::Frame, app: &mut App) {
         .split(inner_area);
 
     let search_paragraph = Paragraph::new(app.global_search_query.as_str())
-        .block(Block::default().borders(Borders::ALL).title("Query"))
-        .style(Style::default().fg(Color::Cyan));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(BORDER_UNFOCUSED))
+                .title(" Query ")
+                .title_style(Style::default().fg(FG_DIM)),
+        )
+        .style(Style::default().fg(ACCENT_CYAN));
     f.render_widget(search_paragraph, chunks[0]);
 
     let items: Vec<ListItem> = app
@@ -1305,10 +1562,13 @@ fn render_global_search_popup(f: &mut ratatui::Frame, app: &mut App) {
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("{:<10}", item.kind),
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(ACCENT_YELLOW),
                     ),
-                    Span::raw(format!("{}::", item.type_name)),
-                    Span::styled(&item.member_name, Style::default().fg(Color::Cyan)),
+                    Span::styled(
+                        format!("{}::", item.type_name),
+                        Style::default().fg(FG_SECONDARY),
+                    ),
+                    Span::styled(&item.member_name, Style::default().fg(ACCENT_CYAN)),
                 ]))
             } else {
                 ListItem::new("Invalid Item")
@@ -1317,8 +1577,15 @@ fn render_global_search_popup(f: &mut ratatui::Frame, app: &mut App) {
         .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Results"))
-        .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(BORDER_UNFOCUSED))
+                .title(" Results ")
+                .title_style(Style::default().fg(FG_DIM)),
+        )
+        .highlight_style(Style::default().bg(SELECTION_BG).fg(FG_PRIMARY));
 
     f.render_stateful_widget(list, chunks[1], &mut app.global_search_state);
 
@@ -1332,7 +1599,8 @@ fn render_global_search_popup(f: &mut ratatui::Frame, app: &mut App) {
         Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
-            .end_symbol(Some("↓")),
+            .end_symbol(Some("↓"))
+            .style(Style::default().fg(BORDER_FOCUSED)),
         chunks[1],
         &mut app.global_search_scroll_state,
     );
@@ -1343,27 +1611,43 @@ fn render_exit_confirmation(f: &mut ratatui::Frame) {
     f.render_widget(Clear, area);
 
     let block = Block::default()
-        .title("Exit Confirmation")
+        .title(" Exit Confirmation ")
+        .title_style(Style::default().fg(ACCENT_RED).add_modifier(Modifier::BOLD))
         .borders(Borders::ALL)
-        .style(Style::default().bg(Color::Red).fg(Color::White));
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ACCENT_RED))
+        .style(Style::default().bg(BG_PRIMARY));
 
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
     let text = vec![
-        Line::from("Are you sure you want to exit?"),
+        Line::from(Span::styled(
+            "Are you sure you want to exit?",
+            Style::default().fg(FG_PRIMARY),
+        )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("Y", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" / "),
-            Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(": Confirm"),
+            Span::styled(" Y ", Style::default().bg(ACCENT_RED).fg(BG_PRIMARY)),
+            Span::styled(" / ", Style::default().fg(FG_DIM)),
+            Span::styled(
+                " Enter ",
+                Style::default()
+                    .fg(ACCENT_RED)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(": Confirm", Style::default().fg(FG_SECONDARY)),
         ]),
         Line::from(vec![
-            Span::styled("N", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" / "),
-            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(": Cancel"),
+            Span::styled(" N ", Style::default().bg(FG_DIM).fg(BG_PRIMARY)),
+            Span::styled(" / ", Style::default().fg(FG_DIM)),
+            Span::styled(
+                " Esc ",
+                Style::default()
+                    .fg(ACCENT_RED)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(": Cancel", Style::default().fg(FG_SECONDARY)),
         ]),
     ];
 
@@ -1392,61 +1676,77 @@ fn render_help_popup(f: &mut ratatui::Frame) {
     f.render_widget(Clear, area);
 
     let block = Block::default()
-        .title("Help - Keyboard Shortcuts")
+        .title(" Help - Keyboard Shortcuts ")
+        .title_style(Style::default().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD))
         .borders(Borders::ALL)
-        .style(Style::default().bg(Color::Black).fg(Color::White));
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(BORDER_FOCUSED))
+        .style(Style::default().bg(BG_PRIMARY));
 
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
     let shortcuts = vec![
         Line::from(vec![
-            Span::styled(" ↑/↓ ", Style::default().fg(Color::Cyan)),
-            Span::raw("Navigate items"),
+            Span::styled(" ↑/↓ ", Style::default().fg(ACCENT_CYAN)),
+            Span::styled("Navigate items", Style::default().fg(FG_PRIMARY)),
         ]),
         Line::from(vec![
-            Span::styled(" PgUp/PgDn ", Style::default().fg(Color::Cyan)),
-            Span::raw("Jump 10 items"),
+            Span::styled(" PgUp/PgDn ", Style::default().fg(ACCENT_CYAN)),
+            Span::styled("Jump 10 items", Style::default().fg(FG_PRIMARY)),
         ]),
         Line::from(vec![
-            Span::styled(" ←/→ ", Style::default().fg(Color::Cyan)),
-            Span::raw("Change focus panel"),
+            Span::styled(" ←/→ ", Style::default().fg(ACCENT_CYAN)),
+            Span::styled("Change focus panel", Style::default().fg(FG_PRIMARY)),
         ]),
         Line::from(vec![
-            Span::styled(" Tab/V ", Style::default().fg(Color::Cyan)),
-            Span::raw("Toggle IDL/Structured view"),
+            Span::styled(" Tab/V ", Style::default().fg(ACCENT_CYAN)),
+            Span::styled("Toggle IDL/Structured view", Style::default().fg(FG_PRIMARY)),
         ]),
         Line::from(vec![
-            Span::styled(" / ", Style::default().fg(Color::Cyan)),
-            Span::raw("Type search in current target"),
+            Span::styled(" / ", Style::default().fg(ACCENT_CYAN)),
+            Span::styled(
+                "Type search in current target",
+                Style::default().fg(FG_PRIMARY),
+            ),
         ]),
         Line::from(vec![
-            Span::styled(" Ctrl+F ", Style::default().fg(Color::Cyan)),
-            Span::raw("Toggle search target (Types/Members)"),
+            Span::styled(" Ctrl+F ", Style::default().fg(ACCENT_CYAN)),
+            Span::styled(
+                "Toggle search target (Types/Members)",
+                Style::default().fg(FG_PRIMARY),
+            ),
         ]),
         Line::from(vec![
-            Span::styled(" Ctrl+P ", Style::default().fg(Color::Cyan)),
-            Span::raw("Open global search"),
+            Span::styled(" Ctrl+P ", Style::default().fg(ACCENT_CYAN)),
+            Span::styled("Open global search", Style::default().fg(FG_PRIMARY)),
         ]),
         Line::from(vec![
-            Span::styled(" Ctrl+C ", Style::default().fg(Color::Cyan)),
-            Span::raw("Exit immediately"),
+            Span::styled(" Ctrl+C ", Style::default().fg(ACCENT_CYAN)),
+            Span::styled("Exit immediately", Style::default().fg(FG_PRIMARY)),
         ]),
         Line::from(vec![
-            Span::styled(" Esc ", Style::default().fg(Color::Cyan)),
-            Span::raw("Exit confirmation / Close popup"),
+            Span::styled(" Esc ", Style::default().fg(ACCENT_CYAN)),
+            Span::styled(
+                "Exit confirmation / Close popup",
+                Style::default().fg(FG_PRIMARY),
+            ),
         ]),
         Line::from(vec![
-            Span::styled(" q ", Style::default().fg(Color::Cyan)),
-            Span::raw("Exit confirmation (when search is empty)"),
+            Span::styled(" q ", Style::default().fg(ACCENT_CYAN)),
+            Span::styled(
+                "Exit confirmation (when search is empty)",
+                Style::default().fg(FG_PRIMARY),
+            ),
         ]),
         Line::from(vec![
-            Span::styled(" ? / F1 ", Style::default().fg(Color::Cyan)),
-            Span::raw("Toggle this help screen"),
+            Span::styled(" ? / F1 ", Style::default().fg(ACCENT_CYAN)),
+            Span::styled("Toggle this help screen", Style::default().fg(FG_PRIMARY)),
         ]),
     ];
 
     let text = Text::from(shortcuts);
+
     let paragraph = Paragraph::new(text)
         .alignment(ratatui::layout::Alignment::Left);
 
