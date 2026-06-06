@@ -345,25 +345,26 @@ fn get_function_info(type_info: &ITypeInfo, func_desc: &FUNCDESC) -> Result<Meth
             format!("arg{}", i)
         };
 
-        let param_flags = unsafe { elem_desc.Anonymous.paramdesc.wParamFlags };
+        let param_flags_raw = unsafe { elem_desc.Anonymous.paramdesc.wParamFlags };
+        let param_flags = ParamFlags::from_bits_truncate(param_flags_raw.0);
         let mut flags = Vec::new();
-        if (param_flags.0 & 1) != 0 {
+        if param_flags.contains(ParamFlags::FIN) {
             flags.push("in".to_string());
         }
-        if (param_flags.0 & 2) != 0 {
+        if param_flags.contains(ParamFlags::FOUT) {
             flags.push("out".to_string());
         }
-        if (param_flags.0 & 4) != 0 {
+        if param_flags.contains(ParamFlags::FLCID) {
             flags.push("lcid".to_string());
         }
-        if (param_flags.0 & 8) != 0 {
+        if param_flags.contains(ParamFlags::FRETVAL) {
             flags.push("retval".to_string());
         }
-        if (param_flags.0 & 16) != 0 {
+        if param_flags.contains(ParamFlags::FOPT) {
             flags.push("optional".to_string());
         }
         let mut default_value = None;
-        if (param_flags.0 & 32) != 0 {
+        if param_flags.contains(ParamFlags::FHASDEFAULT) {
             flags.push("defaultvalue".to_string());
             let val = unsafe {
                 let param_desc_ex = elem_desc.Anonymous.paramdesc.pparamdescex;
